@@ -3,6 +3,7 @@ import re
 
 ESCROW = Path("src/escrow.rs")
 CARGO = Path("Cargo.toml")
+POM_GPU = Path("src/pom_gpu.rs")
 
 text = ESCROW.read_text(encoding="utf-8")
 
@@ -231,4 +232,39 @@ cargo = CARGO.read_text(encoding="utf-8")
 if 'version = "0.4.8"' not in cargo:
     raise SystemExit("Cargo version 0.4.8 not found")
 CARGO.write_text(cargo.replace('version = "0.4.8"', 'version = "0.4.9-escrow-fix-test.1"', 1), encoding="utf-8", newline="\n")
+
+# The hosted runner is used only to validate the escrow fix and produce a Windows
+# test binary for the user's RTX 5080 (sm_89). Keep this CUDA narrowing out of the
+# actual commit; the release source retains the complete 7-image PTX ladder.
+pom = POM_GPU.read_text(encoding="utf-8")
+old_ptx = '''const PTX_SM90: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm90.ptx"));
+const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));
+const PTX_SM86: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm86.ptx"));
+const PTX_SM80: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm80.ptx"));
+const PTX_SM75: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm75.ptx"));
+const PTX_SM70: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm70.ptx"));
+const PTX_SM61: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm61.ptx"));
+const FATBIN_LEGACY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pom_mine_legacy.fatbin"));'''
+new_ptx = '''const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));
+const FATBIN_LEGACY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pom_mine_legacy.fatbin"));'''
+if old_ptx not in pom:
+    raise SystemExit("PoM PTX constant block not found; refusing to narrow CI build")
+pom = pom.replace(old_ptx, new_ptx, 1)
+old_candidates = '''const POM_PTX_CANDIDATES: [(&str, &str, &str); 7] = [
+    ("pom_mine_mod_sm90", "sm_90", PTX_SM90),
+    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),
+    ("pom_mine_mod_sm86", "sm_86", PTX_SM86),
+    ("pom_mine_mod_sm80", "sm_80", PTX_SM80),
+    ("pom_mine_mod_sm75", "sm_75", PTX_SM75),
+    ("pom_mine_mod_sm70", "sm_70", PTX_SM70),
+    ("pom_mine_mod_sm61", "sm_61", PTX_SM61),
+];'''
+new_candidates = '''const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [
+    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),
+];'''
+if old_candidates not in pom:
+    raise SystemExit("PoM PTX candidate block not found; refusing to narrow CI build")
+pom = pom.replace(old_candidates, new_candidates, 1)
+POM_GPU.write_text(pom, encoding="utf-8", newline="\n")
+
 print("escrow fix patch applied")
