@@ -1,0 +1,88 @@
+name: Validate escrow safe recovery test.3
+
+on:
+  push:
+    branches:
+      - test/escrow-safe-recovery-v0.4.9-test.3
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      KERYX_LLAMA_SKIP: "1"
+      POM_SM_LIST: "89"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler ocl-icd-opencl-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CUDA 12.9
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+          use-github-cache: false
+          use-local-cache: false
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          nvcc --version
+          protoc --version
+
+      - name: Limit embedded PTX to sm89 for hosted validation only
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          p = Path("src/pom_gpu.rs")
+          s = p.read_text(encoding="utf-8")
+          constants = re.compile(r'const PTX_SM90:.*?const PTX_SM61:.*?;\n', re.S)
+          s, n1 = constants.subn(
+              'const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));\n',
+              s,
+              count=1,
+          )
+          candidates = re.compile(r'const POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\] = \[.*?\];', re.S)
+          s, n2 = candidates.subn(
+              'const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [\n'
+              '    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),\n'
+              '];',
+              s,
+              count=1,
+          )
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f"sm89 CI patch failed: constants={n1} candidates={n2}")
+          p.write_text(s, encoding="utf-8")
+
+      - name: Compile binary tests
+        shell: bash
+        run: cargo test -p keryx-miner --bin keryx-miner --no-run
+
+      - name: Safe recovery regression tests
+        shell: bash
+        run: |
+          cargo test -p keryx-miner --bin keryx-miner safe_recovery_merge_tests -- --nocapture
+          cargo test -p keryx-miner --bin keryx-miner recovery_tests -- --nocapture
+
+      - name: CSV-window claim regression tests
+        shell: bash
+        run: |
+          cargo test -p keryx-miner --bin keryx-miner legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --nocapture
+          cargo test -p keryx-miner --bin keryx-miner csv_window_follows_the_gate -- --nocapture
+
+      - name: Persistence safety tests
+        shell: bash
+        run: cargo test -p keryx-miner --bin keryx-miner persistence_tests -- --nocapture
