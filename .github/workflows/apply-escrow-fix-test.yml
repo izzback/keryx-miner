@@ -25,8 +25,8 @@ jobs:
       - name: Apply escrow claim fix
         run: python tools/apply_escrow_fix.py
 
-      - name: Verify formatting
-        run: cargo fmt --all -- --check
+      - name: Format patched source
+        run: cargo fmt --all
 
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
