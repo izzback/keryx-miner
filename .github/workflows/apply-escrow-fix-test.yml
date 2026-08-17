@@ -14,7 +14,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       KERYX_LLAMA_SKIP: "1"
-      POM_SM_LIST: "90,89,86,80,75,70,61"
+      POM_SM_LIST: "89"
       KERYX_LLAMA_ARCHS: "89-virtual"
     steps:
       - name: Checkout test branch
@@ -62,6 +62,7 @@ jobs:
           @"
           Keryx Miner v0.4.9-escrow-fix-test.1
 
+          Escrow fix test build for NVIDIA sm_89 / RTX 5080.
           Fixes automated escrow claims when legacy 36,000-DAA coinbase escrows coexist with H6 792,000-DAA escrows.
           Legacy pre-H6 coinbase rewards are reclaimed first; subsequent claims use homogeneous 792,000-DAA batches.
 
@@ -92,5 +93,5 @@ jobs:
             --repo $env:GITHUB_REPOSITORY `
             --target test/escrow-claim-fix-v0.4.9 `
             --title "Keryx Miner v0.4.9-escrow-fix-test.1" `
-            --notes "TEST prerelease: fixes escrow claim starvation when legacy 36,000-DAA coinbase escrows coexist with H6 792,000-DAA escrows. Includes a regression test reproducing the 16-legacy + 100-H6 scenario. Legacy pre-H6 coinbase rewards are claimed first; the next claim returns to homogeneous 792,000-DAA batches." `
+            --notes "TEST prerelease: fixes escrow claim starvation when legacy 36,000-DAA coinbase escrows coexist with H6 792,000-DAA escrows. Includes a regression test reproducing the 16-legacy + 100-H6 scenario. Legacy pre-H6 coinbase rewards are claimed first; the next claim returns to homogeneous 792,000-DAA batches. This Windows binary is intentionally limited to the sm_89 / RTX 5080 PoM PTX image for focused escrow testing." `
             --prerelease
