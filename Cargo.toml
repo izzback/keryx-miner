@@ -1,6 +1,6 @@
 [package]
 name = "keryx-miner"
-version = "0.4.9-escrow-fix-test.2"
+version = "0.4.9-escrow-fix-test.3"
 edition = "2021"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/keryx-labs/keryx-miner"
@@ -96,3 +96,4 @@ sha3 = { git = "https://github.com/elichai/hashes", branch = "cSHAKE" }
 [workspace]
 members = ["inference", "plugins/*"]
 default-members = [".", "plugins/cuda", "plugins/opencl"]
+
