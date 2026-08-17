@@ -438,8 +438,7 @@ impl EscrowWatcher {
                 } else {
                     None
                 };
-                if let Some(csv_window) = csv_window.filter(|_| spk.version == 0 && !self.outpoint_set.contains(&key))
-                {
+                if let Some(csv_window) = csv_window.filter(|_| spk.version == 0 && !self.outpoint_set.contains(&key)) {
                     debug!(
                         "EscrowWatcher: tracked escrow coinbase={}…[{}] daa={} amount={}",
                         &coinbase_txid[..16.min(coinbase_txid.len())],
@@ -666,65 +665,121 @@ impl EscrowWatcher {
         // one dead input orphan the whole TX and stall the live entries.
         let mut batch: Vec<usize> = Vec::new();
         let mut selected = false;
+
         for pass in 0..3u8 {
-            batch.clear();
-            let mut limit = MAX_CLAIM_BATCH;
-            // A batch never mixes CSV windows: one sequence and one escrow script are
-            // signed for the whole TX. The first selected entry fixes the batch's window.
-            let mut batch_window: Option<u64> = None;
-            // Nominal pass: iterate inference entries first so they get batch priority;
-            // the sort is stable, so queue order is preserved within each kind.
             let mut indices: Vec<usize> = (0..self.state.entries.len()).collect();
             if pass == 0 {
+                // Inference escrows keep priority in the normal pass, as before.
                 indices.sort_by_key(|&i| !self.state.entries[i].is_inference);
             }
-            for &i in &indices {
-                let e = &self.state.entries[i];
-                // Only the (transient, forgivable) flag decides the dead pool; the
-                // orphan_retries counter is the cumulative memory driving the permanent
-                // slash and must not keep an entry in the dead pool forever on its own.
-                let proven_dead = e.orphan_slashed;
-                let in_pass = match pass {
-                    0 => e.batch_cap == 0 && !proven_dead,
-                    1 => e.batch_cap != 0 && !proven_dead,
-                    _ => proven_dead,
-                };
-                if !in_pass {
-                    continue;
-                }
-                let eligible = !e.claimed
-                    && !e.slashed
-                    && daa_score >= e.confirm_daa + e.csv_window + 10
-                    && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
-                    && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
-                if !eligible {
-                    continue;
-                }
-                if batch_window.map_or(false, |w| w != e.csv_window) {
-                    continue;
-                }
-                let cap = if e.batch_cap == 0 { MAX_CLAIM_BATCH } else { (e.batch_cap as usize).min(MAX_CLAIM_BATCH) };
-                if cap.min(limit) < batch.len() + 1 {
-                    continue; // joining would violate this entry's cap (or shrink below current size)
-                }
-                limit = limit.min(cap);
-                batch_window = Some(e.csv_window);
-                batch.push(i);
-                if batch.len() >= limit {
-                    break; // batch is full for this pass
+
+            // One-time legacy coinbase catch-up. Pre-H6 coinbase escrows use the
+            // 36k window and can never reach the 87-input nominal batch once H6
+            // coinbases have moved to 792k. Claim them together first, then the
+            // normal H6 792k cycle resumes on the next block.
+            if pass == 0 {
+                let legacy: Vec<usize> = indices
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let e = &self.state.entries[i];
+                        !e.claimed
+                            && !e.slashed
+                            && !e.is_inference
+                            && e.csv_window == CHALLENGE_WINDOW_BLOCKS
+                            && e.batch_cap == 0
+                            && !e.orphan_slashed
+                            && e.orphan_retries == 0
+                            && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
+                            && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
+                            && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index))
+                    })
+                    .take(MAX_CLAIM_BATCH)
+                    .collect();
+
+                let legacy_total: u64 = legacy.iter().map(|&i| self.state.entries[i].amount_sompi).sum();
+                if !legacy.is_empty() && legacy_total > CLAIM_FEE_SOMPI {
+                    batch = legacy;
+                    selected = true;
+                    break;
                 }
             }
-            let releasable = match pass {
-                // Nominal batches ship full or not at all (fee amortization).
-                0 => batch.len() >= MIN_CLAIM_BATCH,
-                // Repair and dead-pool batches flow at any size.
-                _ => !batch.is_empty(),
-            };
-            if releasable {
-                selected = true;
+
+            // Select one CSV window at a time. A claim transaction cannot safely
+            // mix 36k and 792k inputs because every input carries the same sequence
+            // value. The old implementation let the first window encountered lock
+            // the whole batch, so a small legacy 36k group starved the large 792k group.
+            let mut windows: Vec<u64> = Vec::new();
+            for &i in &indices {
+                let e = &self.state.entries[i];
+                let proven_dead = e.orphan_slashed || e.orphan_retries > 0;
+                let in_pass = match pass {
+                    0 => !proven_dead && e.batch_cap == 0,
+                    1 => !proven_dead && e.batch_cap != 0,
+                    _ => proven_dead,
+                };
+                let eligible = in_pass
+                    && !e.claimed
+                    && !e.slashed
+                    && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
+                    && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
+                    && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
+                if eligible && !windows.iter().any(|&w| w == e.csv_window) {
+                    windows.push(e.csv_window);
+                }
+            }
+
+            for window in windows {
+                let mut candidate: Vec<usize> = Vec::new();
+                let mut limit = MAX_CLAIM_BATCH;
+
+                for &i in &indices {
+                    let e = &self.state.entries[i];
+                    if e.csv_window != window {
+                        continue;
+                    }
+                    let proven_dead = e.orphan_slashed || e.orphan_retries > 0;
+                    let in_pass = match pass {
+                        0 => !proven_dead && e.batch_cap == 0,
+                        1 => !proven_dead && e.batch_cap != 0,
+                        _ => proven_dead,
+                    };
+                    let eligible = in_pass
+                        && !e.claimed
+                        && !e.slashed
+                        && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
+                        && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
+                        && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
+                    if !eligible {
+                        continue;
+                    }
+
+                    let cap =
+                        if e.batch_cap == 0 { MAX_CLAIM_BATCH } else { (e.batch_cap as usize).min(MAX_CLAIM_BATCH) };
+                    if cap.min(limit) < candidate.len() + 1 {
+                        continue;
+                    }
+                    limit = limit.min(cap);
+                    candidate.push(i);
+                    if candidate.len() >= limit {
+                        break;
+                    }
+                }
+
+                let releasable = if pass == 0 { candidate.len() >= MIN_CLAIM_BATCH } else { !candidate.is_empty() };
+
+                if releasable {
+                    batch = candidate;
+                    selected = true;
+                    break;
+                }
+            }
+
+            if selected {
                 break;
             }
         }
+
         if !selected {
             return None;
         }
@@ -962,20 +1017,15 @@ impl EscrowWatcher {
             inputs_meta.push((txid_bytes, entry.output_index, entry.amount_sompi));
         }
 
-        let reused = SighashReused::new(
-            &inputs_meta,
-            amount_out,
-            self.payout_spk_version,
-            &self.payout_spk_script,
-            csv_window,
-        );
+        let reused =
+            SighashReused::new(&inputs_meta, amount_out, self.payout_spk_version, &self.payout_spk_script, csv_window);
         let keypair = secp256k1::Keypair::from_secret_key(&self.secp, &self.secret_key);
 
         let mut inputs: Vec<RpcTransactionInput> = Vec::with_capacity(entries.len());
         for (entry, meta) in entries.iter().zip(&inputs_meta) {
             let sighash = compute_sighash(meta, &escrow_script, &reused, csv_window);
-            let msg = secp256k1::Message::from_digest_slice(&sighash)
-                .map_err(|e| format!("sighash message error: {}", e))?;
+            let msg =
+                secp256k1::Message::from_digest_slice(&sighash).map_err(|e| format!("sighash message error: {}", e))?;
             let sig = self.secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
             // signature_script: OpData65 (0x41) | 64-byte sig | SIG_HASH_ALL (0x01)
@@ -996,13 +1046,8 @@ impl EscrowWatcher {
             });
         }
 
-        let claim_txid = compute_claim_txid(
-            &inputs_meta,
-            amount_out,
-            self.payout_spk_version,
-            &self.payout_spk_script,
-            csv_window,
-        );
+        let claim_txid =
+            compute_claim_txid(&inputs_meta, amount_out, self.payout_spk_version, &self.payout_spk_script, csv_window);
 
         Ok((
             claim_txid,
@@ -1656,11 +1701,9 @@ mod tests {
         assert!(verify_escrow_cert(own, &escrow_pubkey, &cert).is_ok());
 
         // Any other payout address: the miner does not hold that key, so it must refuse.
-        assert!(self_sign_cert(
-            privkey,
-            "keryx:qrxpcusyrxjxghfdumcxm2rqw4dhe3n9hyqpvgn2wfyldltf99w2xhnajuhte"
-        )
-        .is_none());
+        assert!(
+            self_sign_cert(privkey, "keryx:qrxpcusyrxjxghfdumcxm2rqw4dhe3n9hyqpvgn2wfyldltf99w2xhnajuhte").is_none()
+        );
     }
 
     /// A cert only verifies against the exact payout address and escrow key it was signed for.
@@ -1693,12 +1736,8 @@ mod tests {
     fn responder_signature_verifies_like_the_node() {
         let dir = std::env::temp_dir().join(format!("keryx-escrow-test-{}", std::process::id()));
         let privkey = "1111111111111111111111111111111111111111111111111111111111111111";
-        let w = EscrowWatcher::new(
-            privkey,
-            "keryx:qrxpcusyrxjxghfdumcxm2rqw4dhe3n9hyqpvgn2wfyldltf99w2xhnajuhte",
-            dir,
-        )
-        .unwrap();
+        let w = EscrowWatcher::new(privkey, "keryx:qrxpcusyrxjxghfdumcxm2rqw4dhe3n9hyqpvgn2wfyldltf99w2xhnajuhte", dir)
+            .unwrap();
 
         let resp = keryx_inference::AiResponsePayload::new([9u8; 32], 123, [7u8; 34], 5);
         let signed_bytes = resp.signed_bytes();
@@ -1752,6 +1791,67 @@ mod tests {
     /// The window is derived from the creating block's DAA, so entries minted on either
     /// side of the gate keep their own lock.
     #[test]
+    #[test]
+    fn legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("escrow_state.json");
+        let mut watcher = EscrowWatcher::new(&"11".repeat(32), TEST_PAYOUT_ADDRESS, state_path).unwrap();
+
+        // Reproduce the observed backlog: 16 legacy coinbase escrows at 36k,
+        // followed by a large H6 backlog at 792k.
+        watcher.state.entries = (0..16)
+            .map(|i| EscrowEntry {
+                coinbase_txid: format!("{:064x}", i + 1),
+                block_hash: format!("{:064x}", 10_000 + i),
+                confirm_daa: 0,
+                amount_sompi: 108_000_000,
+                output_index: 1,
+                claimed: false,
+                slashed: false,
+                orphan_slashed: false,
+                orphan_retries: 0,
+                orphan_retry_after_daa: None,
+                submit_retries: 0,
+                batch_cap: 0,
+                cap_set_daa: 0,
+                is_inference: false,
+                csv_window: CHALLENGE_WINDOW_BLOCKS,
+            })
+            .chain((0..100).map(|i| EscrowEntry {
+                coinbase_txid: format!("{:064x}", 20_000 + i),
+                block_hash: format!("{:064x}", 30_000 + i),
+                confirm_daa: 0,
+                amount_sompi: 108_000_000,
+                output_index: 1,
+                claimed: false,
+                slashed: false,
+                orphan_slashed: false,
+                orphan_retries: 0,
+                orphan_retry_after_daa: None,
+                submit_retries: 0,
+                batch_cap: 0,
+                cap_set_daa: 0,
+                is_inference: false,
+                csv_window: SERVICE_BOND_CSV_WINDOW_BLOCKS,
+            }))
+            .collect();
+        watcher.rebuild_indexes();
+
+        let legacy_claim = watcher.find_claim(1_000_000).expect("legacy claim must be built");
+        assert_eq!(legacy_claim.inputs.len(), 16);
+        assert!(legacy_claim.inputs.iter().all(|i| i.sequence == CHALLENGE_WINDOW_BLOCKS));
+
+        let legacy_txid = watcher.in_flight.keys().next().cloned().unwrap();
+        assert!(matches!(
+            watcher.on_submit_response(&legacy_txid, None),
+            SubmitResponseOutcome::Accepted { outputs: 16, .. }
+        ));
+
+        let h6_claim = watcher.find_claim(1_000_000).expect("H6 claim must follow legacy cleanup");
+        assert_eq!(h6_claim.inputs.len(), MAX_CLAIM_BATCH);
+        assert!(h6_claim.inputs.iter().all(|i| i.sequence == SERVICE_BOND_CSV_WINDOW_BLOCKS));
+    }
+
     fn csv_window_follows_the_gate() {
         let gate = keryx_miner::pom::pom_v3_activation_daa();
         if gate > 0 && gate < u64::MAX {
