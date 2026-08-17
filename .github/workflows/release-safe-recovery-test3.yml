@@ -1,0 +1,155 @@
+name: Build safe recovery test.3 Windows prerelease
+
+on:
+  push:
+    branches:
+      - test/escrow-safe-recovery-v0.4.9-test.3
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      KERYX_LLAMA_SKIP: "0"
+      POM_SM_LIST: "90,89,86,80,75,70,61"
+      KERYX_LLAMA_ARCHS: "75-real;80-real;86-real;89-real;89-virtual"
+
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: test/escrow-safe-recovery-v0.4.9-test.3
+          fetch-depth: 0
+
+      - name: Verify source version and recovery guard
+        shell: pwsh
+        run: |
+          Select-String -Path Cargo.toml -Pattern 'version = "0.4.9-escrow-fix-test.3"' | Out-Null
+          Select-String -Path src/main.rs -Pattern 'Recovery merge complete' | Out-Null
+          Select-String -Path src/main.rs -Pattern 'pre-recover' | Out-Null
+          Select-String -Path src/escrow.rs -Pattern 'raw rejection for claim' | Out-Null
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          choco install protoc -y --no-progress
+          protoc --version
+
+      - name: Install CUDA 12.9 with cuBLAS
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
+          use-github-cache: false
+          use-local-cache: false
+
+      - name: Setup MSVC 2022
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          vsversion: "2022"
+
+      - name: Build matched miner CUDA plugin and llama runtime
+        shell: pwsh
+        run: |
+          Write-Host "KERYX_LLAMA_SKIP=$env:KERYX_LLAMA_SKIP"
+          nvcc --version
+          cmake --version
+          cargo build -p keryx-miner -p keryxcuda --release
+
+      - name: Verify matched runtime files
+        shell: pwsh
+        run: |
+          $required = @(
+            'target/release/keryx-miner.exe',
+            'target/release/keryxcuda.dll',
+            'target/release/keryx-llama.dll'
+          )
+          foreach ($f in $required) {
+            if (-not (Test-Path $f)) { throw "Missing required runtime file: $f" }
+            $item = Get-Item $f
+            Write-Host "$f -> $($item.Length) bytes"
+          }
+          if ((Get-Item 'target/release/keryx-llama.dll').Length -lt 1000000) {
+            throw 'keryx-llama.dll is unexpectedly small'
+          }
+
+      - name: Package test.3
+        shell: pwsh
+        run: |
+          $dist = 'dist-v0.4.9-escrow-fix-test.3'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item target/release/keryx-miner.exe $dist/
+          Copy-Item target/release/keryxcuda.dll $dist/
+          Copy-Item target/release/keryx-llama.dll $dist/
+          @"
+          Keryx Miner v0.4.9-escrow-fix-test.3
+
+          TEST BUILD — safe escrow recovery + mixed CSV-window claim handling.
+
+          Runtime:
+          - keryx-miner.exe, keryxcuda.dll and keryx-llama.dll are built together.
+          - KERYX_LLAMA_SKIP=0; keep all three files together.
+          - CUDA 12.9 / Windows x64.
+
+          Safe --recover-escrow behavior:
+          - existing escrow_state.json entries are preserved if the recovery API omits them;
+          - API results are merged by txid + output_index;
+          - existing claimed/slashed/retry/csv_window state is never reset by recovery;
+          - corrupt/duplicate/conflicting existing state fails closed;
+          - before writing, an automatic escrow_state.json.pre-recover.<timestamp>.<pid>.bak is created;
+          - the merged entry count is forbidden from becoming smaller than the existing state.
+
+          Claim behavior inherited from test.2:
+          - legacy 36,000-DAA coinbase catch-up is kept separate;
+          - H6 entries keep their real 792,000-DAA maturity;
+          - claim transactions never mix CSV windows;
+          - normal H6 claims continue in homogeneous batches of up to 87 inputs.
+
+          IMPORTANT LIVE TEST PROCEDURE:
+          - Do NOT use a state file already modified by the failed/burn test as your source of truth.
+          - Start from a COPY of the clean escrow_state_RECOVERY_2026-08-17.json backup.
+          - Keep the original escrow.key; never regenerate it.
+          - Keep the clean recovery backup untouched.
+          "@ | Set-Content "$dist/README-TEST.txt" -Encoding utf8
+
+          $hashLines = foreach ($f in @('keryx-miner.exe','keryxcuda.dll','keryx-llama.dll','README-TEST.txt')) {
+            $h = (Get-FileHash "$dist/$f" -Algorithm SHA256).Hash.ToLower()
+            "$h  $f"
+          }
+          $hashLines | Set-Content "$dist/SHA256SUMS.txt" -Encoding ascii
+          Compress-Archive -Path "$dist/*" -DestinationPath 'keryx-miner-v0.4.9-escrow-fix-test.3-win64.zip' -Force
+          $zipHash = (Get-FileHash 'keryx-miner-v0.4.9-escrow-fix-test.3-win64.zip' -Algorithm SHA256).Hash.ToLower()
+          Write-Host "ZIP SHA256=$zipHash"
+          Set-Content 'ZIP-SHA256.txt' "$zipHash  keryx-miner-v0.4.9-escrow-fix-test.3-win64.zip" -Encoding ascii
+
+      - name: Remove one-shot release workflow and commit final release head
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/release-safe-recovery-test3.yml
+          git commit -m "chore: finalize safe recovery test.3 release head"
+          git push origin HEAD:test/escrow-safe-recovery-v0.4.9-test.3
+
+      - name: Create GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create 'v0.4.9-escrow-fix-test.3' `
+            'keryx-miner-v0.4.9-escrow-fix-test.3-win64.zip' `
+            'dist-v0.4.9-escrow-fix-test.3/keryx-miner.exe' `
+            'dist-v0.4.9-escrow-fix-test.3/keryxcuda.dll' `
+            'dist-v0.4.9-escrow-fix-test.3/keryx-llama.dll' `
+            'dist-v0.4.9-escrow-fix-test.3/SHA256SUMS.txt' `
+            'ZIP-SHA256.txt' `
+            --repo $env:GITHUB_REPOSITORY `
+            --target test/escrow-safe-recovery-v0.4.9-test.3 `
+            --title 'Keryx Miner v0.4.9-escrow-fix-test.3' `
+            --notes 'TEST prerelease based directly on v0.4.9-escrow-fix-test.2. Adds non-destructive --recover-escrow merge with automatic pre-recovery backup and fail-closed metadata checks, plus detailed burned-outpoint diagnostics. Preserves the test.2 36k/792k claim logic. Ships a matched Windows runtime: keryx-miner.exe + keryxcuda.dll + keryx-llama.dll, built with KERYX_LLAMA_SKIP=0.' `
+            --prerelease
