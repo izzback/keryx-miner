@@ -45,8 +45,16 @@ jobs:
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1.13.0
-        with:
-          vsversion: "2022"
+
+      - name: Allow CUDA 12.9 with the VS2026 test runner
+        shell: pwsh
+        run: |
+          $path = "build.rs"
+          $text = Get-Content -Raw $path
+          $old = '.args(["-ptx", "-O3", &format!("-arch=sm_{sm}"), "cuda/pom_mine.cu", "-o", &ptx])'
+          $new = '.args(["-allow-unsupported-compiler", "-ptx", "-O3", &format!("-arch=sm_{sm}"), "cuda/pom_mine.cu", "-o", &ptx])'
+          if (-not $text.Contains($old)) { throw "CUDA nvcc argument pattern not found" }
+          Set-Content -Path $path -Value $text.Replace($old, $new) -Encoding utf8
 
       - name: Verify targeted escrow regression test
         run: cargo test --lib legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --exact
