@@ -1803,7 +1803,6 @@ mod tests {
     /// The window is derived from the creating block's DAA, so entries minted on either
     /// side of the gate keep their own lock.
     #[test]
-    #[test]
     fn legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues() {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("escrow_state.json");
@@ -1869,6 +1868,7 @@ mod tests {
         assert!(h6_claim.inputs.iter().all(|i| i.sequence == SERVICE_BOND_CSV_WINDOW_BLOCKS));
     }
 
+    #[test]
     fn csv_window_follows_the_gate() {
         let gate = keryx_miner::pom::pom_v3_activation_daa();
         if gate > 0 && gate < u64::MAX {
