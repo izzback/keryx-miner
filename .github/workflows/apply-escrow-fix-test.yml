@@ -48,8 +48,8 @@ jobs:
         with:
           vsversion: "2022"
 
-      - name: Verify targeted escrow regression test
-        run: cargo test -p keryx-miner --lib legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --exact
+      - name: Compile targeted escrow regression test
+        run: cargo test -p keryx-miner --lib --no-run legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --exact
 
       - name: Build Windows release binary
         run: cargo build -p keryx-miner --release --bin keryx-miner
@@ -66,6 +66,7 @@ jobs:
           Fixes automated escrow claims when legacy 36,000-DAA coinbase escrows coexist with H6 792,000-DAA escrows.
           Legacy pre-H6 coinbase rewards are reclaimed first; subsequent claims use homogeneous 792,000-DAA batches.
 
+          The regression test is compiled in CI but not executed because GitHub-hosted Windows runners have no NVIDIA runtime; execute the test and live escrow claim on the RTX 5080 host.
           Build mode: KERYX_LLAMA_SKIP=1. Use the existing libkeryx-llama.dll from your normal miner package if needed.
           This is a TEST prerelease. Do not use it as a production release until the live escrow claim is confirmed.
           "@ | Set-Content dist/README-escrow-fix-test.txt -Encoding utf8
