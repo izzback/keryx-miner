@@ -14,7 +14,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       KERYX_LLAMA_SKIP: "1"
-      POM_SM_LIST: "89"
+      POM_SM_LIST: "90,89,86,80,75,70,61"
       KERYX_LLAMA_ARCHS: "89-virtual"
 
     steps:
@@ -113,7 +113,7 @@ jobs:
           @"
           Keryx Miner v0.4.9-escrow-fix-test.2
 
-          TEST BUILD for Windows / NVIDIA sm_89 (RTX 5080 focused).
+          TEST BUILD for Windows / NVIDIA CUDA.
 
           Escrow changes:
           - legacy pre-H6 36,000-DAA coinbase rewards are reclaimed first;
@@ -136,7 +136,7 @@ jobs:
             "$cudaHash  keryxcuda.dll"
           ) | Set-Content dist/SHA256SUMS.txt -Encoding ascii
 
-          Compress-Archive -Path dist/* -DestinationPath keryx-miner-v0.4.9-escrow-fix-test.2-win64-sm89.zip -Force
+          Compress-Archive -Path dist/* -DestinationPath keryx-miner-v0.4.9-escrow-fix-test.2-win64.zip -Force
 
       - name: Commit corrected source
         shell: pwsh
@@ -154,9 +154,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v0.4.9-escrow-fix-test.2"
-          gh release create $tag keryx-miner-v0.4.9-escrow-fix-test.2-win64-sm89.zip dist/keryx-miner.exe dist/keryxcuda.dll dist/SHA256SUMS.txt `
+          gh release create $tag keryx-miner-v0.4.9-escrow-fix-test.2-win64.zip dist/keryx-miner.exe dist/keryxcuda.dll dist/SHA256SUMS.txt `
             --repo $env:GITHUB_REPOSITORY `
             --target test/escrow-claim-fix-v0.4.9 `
             --title "Keryx Miner v0.4.9-escrow-fix-test.2" `
-            --notes "TEST prerelease. Fixes legacy 36k escrow starvation while preserving the real 792k H6 maturity window. Windows package now ships a matched keryx-miner.exe + keryxcuda.dll pair; replace both together. sm_89 focused build for RTX 5080 testing." `
+            --notes "TEST prerelease. Fixes legacy 36k escrow starvation while preserving the real 792k H6 maturity window. Windows package ships a matched keryx-miner.exe + keryxcuda.dll pair; replace both together." `
             --prerelease
