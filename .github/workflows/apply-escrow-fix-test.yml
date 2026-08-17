@@ -49,10 +49,10 @@ jobs:
           vsversion: "2022"
 
       - name: Verify targeted escrow regression test
-        run: cargo test --lib legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --exact
+        run: cargo test -p keryx-miner --lib legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --exact
 
       - name: Build Windows release binary
-        run: cargo build --release --bin keryx-miner
+        run: cargo build -p keryx-miner --release --bin keryx-miner
 
       - name: Package test binary
         shell: pwsh
