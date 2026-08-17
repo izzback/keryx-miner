@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install protoc and OpenCL loader headers
+      - name: Install build prerequisites
         shell: bash
         run: |
           sudo apt-get update -qq
@@ -31,8 +31,18 @@ jobs:
           cuda: "12.9.1"
           method: network
           sub-packages: '["nvcc", "cudart"]'
+          use-github-cache: false
+          use-local-cache: false
 
-      - name: Limit embedded PTX to sm89 for hosted validation
+      - name: Show toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          nvcc --version
+          protoc --version
+
+      - name: Limit embedded PTX to sm89 for hosted validation only
         shell: python
         run: |
           from pathlib import Path
@@ -40,19 +50,13 @@ jobs:
 
           p = Path("src/pom_gpu.rs")
           s = p.read_text(encoding="utf-8")
-          constants = re.compile(
-              r'const PTX_SM90:.*?const PTX_SM61:.*?;\n',
-              re.S,
-          )
+          constants = re.compile(r'const PTX_SM90:.*?const PTX_SM61:.*?;\n', re.S)
           s, n1 = constants.subn(
               'const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));\n',
               s,
               count=1,
           )
-          candidates = re.compile(
-              r'const POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\] = \[.*?\];',
-              re.S,
-          )
+          candidates = re.compile(r'const POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\] = \[.*?\];', re.S)
           s, n2 = candidates.subn(
               'const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [\n'
               '    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),\n'
