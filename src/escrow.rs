@@ -853,6 +853,7 @@ impl EscrowWatcher {
                 outcome = SubmitResponseOutcome::Accepted { outputs: n_outputs as u64, amount_sompi };
             }
             Some(msg) => {
+                debug!("EscrowWatcher: raw rejection for claim {} ({} output(s)): {}", claim_txid, n_outputs, msg);
                 // Retriable rejections: sequence-lock timing races and orphan/dag-reorg
                 // situations where the source block is off the selected chain.
                 let is_orphan = msg.contains("orphan");
@@ -873,6 +874,17 @@ impl EscrowWatcher {
                             .collect()
                     })
                     .unwrap_or_default();
+                if !burned_set.is_empty() {
+                    let mut burned_outpoints: Vec<String> =
+                        burned_set.iter().map(|(txid, index)| format!("{}:{}", txid, index)).collect();
+                    burned_outpoints.sort();
+                    debug!(
+                        "EscrowWatcher: node reported {} burned escrow outpoint(s) for claim {}: {:?}",
+                        burned_outpoints.len(),
+                        claim_txid,
+                        burned_outpoints
+                    );
+                }
                 let batch_rejected = n_outputs > 1;
                 let last_daa = self.last_daa_score;
                 // Bisection step: one dead input orphans the whole batch, but most members
