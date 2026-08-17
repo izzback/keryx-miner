@@ -27,99 +27,11 @@ jobs:
           path = Path("src/main.rs")
           text = path.read_text(encoding="utf-8")
 
-          old_fn = r'''fn recovered_escrow_state(api_entries: Vec<ApiEscrowEntry>) -> Result<(escrow::EscrowState, u64), String> {
-              let mut entries = Vec::with_capacity(api_entries.len());
-              let mut outpoints = std::collections::HashSet::with_capacity(api_entries.len());
-              let mut total_sompi = 0u64;
-              for api_entry in api_entries {
-                  if api_entry.coinbase_txid.len() != 64 || !api_entry.coinbase_txid.bytes().all(|b| b.is_ascii_hexdigit()) {
-                      return Err("Recovery API returned an invalid coinbase transaction ID".into());
-                  }
-                  if api_entry.block_hash.len() != 64 || !api_entry.block_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-                      return Err("Recovery API returned an invalid block hash".into());
-                  }
-                  let confirm_daa = u64::try_from(api_entry.confirm_daa)
-                      .map_err(|_| "Recovery API returned a negative confirmation DAA score")?;
-                  let amount_sompi =
-                      u64::try_from(api_entry.amount_sompi).map_err(|_| "Recovery API returned a negative escrow amount")?;
-                  if amount_sompi == 0 {
-                      return Err("Recovery API returned a zero escrow amount".into());
-                  }
-                  let output_index =
-                      u32::try_from(api_entry.output_index).map_err(|_| "Recovery API returned an invalid output index")?;
-                  let coinbase_txid = api_entry.coinbase_txid.to_ascii_lowercase();
-                  if !outpoints.insert((coinbase_txid.clone(), output_index)) {
-                      return Err("Recovery API returned a duplicate escrow outpoint".into());
-                  }
-                  total_sompi = total_sompi.checked_add(amount_sompi).ok_or("Recovered escrow amount overflow")?;
-                  entries.push(escrow::EscrowEntry {
-                      coinbase_txid,
-                      block_hash: api_entry.block_hash.to_ascii_lowercase(),
-                      confirm_daa,
-                      amount_sompi,
-                      output_index,
-                      claimed: false,
-                      slashed: false,
-                      orphan_slashed: false,
-                      orphan_retries: 0,
-                      orphan_retry_after_daa: None,
-                      submit_retries: 0,
-                      batch_cap: 0,
-                      cap_set_daa: 0,
-                      is_inference: false,
-                      csv_window: escrow::csv_window_for_daa(confirm_daa),
-                  });
-              }
-              Ok((escrow::EscrowState { entries }, total_sompi))
-          }
-          '''
-
-          new_fn = r'''fn recovered_escrow_state(api_entries: Vec<ApiEscrowEntry>) -> Result<(escrow::EscrowState, u64), String> {
-              let mut entries = Vec::with_capacity(api_entries.len());
-              let mut outpoints = std::collections::HashSet::with_capacity(api_entries.len());
-              let mut total_sompi = 0u64;
-              for api_entry in api_entries {
-                  if api_entry.coinbase_txid.len() != 64 || !api_entry.coinbase_txid.bytes().all(|b| b.is_ascii_hexdigit()) {
-                      return Err("Recovery API returned an invalid coinbase transaction ID".into());
-                  }
-                  if api_entry.block_hash.len() != 64 || !api_entry.block_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-                      return Err("Recovery API returned an invalid block hash".into());
-                  }
-                  let confirm_daa = u64::try_from(api_entry.confirm_daa)
-                      .map_err(|_| "Recovery API returned a negative confirmation DAA score")?;
-                  let amount_sompi =
-                      u64::try_from(api_entry.amount_sompi).map_err(|_| "Recovery API returned a negative escrow amount")?;
-                  if amount_sompi == 0 {
-                      return Err("Recovery API returned a zero escrow amount".into());
-                  }
-                  let output_index =
-                      u32::try_from(api_entry.output_index).map_err(|_| "Recovery API returned an invalid output index")?;
-                  let coinbase_txid = api_entry.coinbase_txid.to_ascii_lowercase();
-                  if !outpoints.insert((coinbase_txid.clone(), output_index)) {
-                      return Err("Recovery API returned a duplicate escrow outpoint".into());
-                  }
-                  total_sompi = total_sompi.checked_add(amount_sompi).ok_or("Recovered escrow amount overflow")?;
-                  entries.push(escrow::EscrowEntry {
-                      coinbase_txid,
-                      block_hash: api_entry.block_hash.to_ascii_lowercase(),
-                      confirm_daa,
-                      amount_sompi,
-                      output_index,
-                      claimed: false,
-                      slashed: false,
-                      orphan_slashed: false,
-                      orphan_retries: 0,
-                      orphan_retry_after_daa: None,
-                      submit_retries: 0,
-                      batch_cap: 0,
-                      cap_set_daa: 0,
-                      is_inference: false,
-                      csv_window: escrow::csv_window_for_daa(confirm_daa),
-                  });
-              }
-              Ok((escrow::EscrowState { entries }, total_sompi))
-          }
-
+          helper_marker = "async fn client_main(\n"
+          if "fn merge_recovered_escrow_state(" not in text:
+              if helper_marker not in text:
+                  raise SystemExit("client_main marker missing; refusing blind patch")
+              helpers = r'''
           fn merge_recovered_escrow_state(
               mut existing: escrow::EscrowState,
               recovered: escrow::EscrowState,
@@ -151,8 +63,8 @@ jobs:
                               key.0, key.1
                           ));
                       }
-                      // Preserve every local status/cooldown/window field. Recovery must never
-                      // resurrect a claimed/slashed entry or erase a legacy CSV-window decision.
+                      // Existing state is authoritative. Never reset claimed/slashed flags,
+                      // retry/cooldown state, inference identity, or the stored CSV window.
                       continue;
                   }
 
@@ -206,68 +118,20 @@ jobs:
                       total.checked_add(e.amount_sompi).ok_or_else(|| "Escrow pending amount overflow".to_string())
                   })
           }
+
           '''
+              text = text.replace(helper_marker, helpers + helper_marker, 1)
 
-          if old_fn not in text:
-              raise SystemExit("expected recovered_escrow_state block not found; refusing blind patch")
-          text = text.replace(old_fn, new_fn, 1)
-
-          old_tests = r'''#[cfg(test)]
-          mod recovery_tests {
+          if "mod safe_recovery_merge_tests" not in text:
+              test_marker = "fn filter_plugins(dirname: &str) -> Vec<String> {\n"
+              if test_marker not in text:
+                  raise SystemExit("filter_plugins marker missing; refusing blind patch")
+              tests = r'''
+          #[cfg(test)]
+          mod safe_recovery_merge_tests {
               use super::*;
 
-              fn api_entry() -> ApiEscrowEntry {
-                  ApiEscrowEntry {
-                      coinbase_txid: "AB".repeat(32),
-                      block_hash: "CD".repeat(32),
-                      confirm_daa: 10,
-                      amount_sompi: 20,
-                      output_index: 1,
-                  }
-              }
-
-              #[test]
-              fn recovery_validates_and_normalizes_entries() {
-                  let (state, total) = recovered_escrow_state(vec![api_entry()]).unwrap();
-                  assert_eq!(total, 20);
-                  assert_eq!(state.entries[0].coinbase_txid, "ab".repeat(32));
-                  assert_eq!(state.entries[0].block_hash, "cd".repeat(32));
-              }
-
-              #[test]
-              fn recovery_rejects_invalid_network_values() {
-                  let mut entry = api_entry();
-                  entry.confirm_daa = -1;
-                  assert!(recovered_escrow_state(vec![entry]).is_err());
-
-                  let mut entry = api_entry();
-                  entry.output_index = i64::from(u32::MAX) + 1;
-                  assert!(recovered_escrow_state(vec![entry]).is_err());
-
-                  let mut entry = api_entry();
-                  entry.coinbase_txid = "not-a-hash".into();
-                  assert!(recovered_escrow_state(vec![entry]).is_err());
-
-                  assert!(recovered_escrow_state(vec![api_entry(), api_entry()]).is_err());
-              }
-          }
-          '''
-
-          new_tests = r'''#[cfg(test)]
-          mod recovery_tests {
-              use super::*;
-
-              fn api_entry() -> ApiEscrowEntry {
-                  ApiEscrowEntry {
-                      coinbase_txid: "AB".repeat(32),
-                      block_hash: "CD".repeat(32),
-                      confirm_daa: 10,
-                      amount_sompi: 20,
-                      output_index: 1,
-                  }
-              }
-
-              fn state_entry(tx_byte: &str, index: u32) -> escrow::EscrowEntry {
+              fn entry(tx_byte: &str, index: u32) -> escrow::EscrowEntry {
                   escrow::EscrowEntry {
                       coinbase_txid: tx_byte.repeat(32),
                       block_hash: "11".repeat(32),
@@ -288,63 +152,37 @@ jobs:
               }
 
               #[test]
-              fn recovery_validates_and_normalizes_entries() {
-                  let (state, total) = recovered_escrow_state(vec![api_entry()]).unwrap();
-                  assert_eq!(total, 20);
-                  assert_eq!(state.entries[0].coinbase_txid, "ab".repeat(32));
-                  assert_eq!(state.entries[0].block_hash, "cd".repeat(32));
-              }
-
-              #[test]
-              fn recovery_rejects_invalid_network_values() {
-                  let mut entry = api_entry();
-                  entry.confirm_daa = -1;
-                  assert!(recovered_escrow_state(vec![entry]).is_err());
-
-                  let mut entry = api_entry();
-                  entry.output_index = i64::from(u32::MAX) + 1;
-                  assert!(recovered_escrow_state(vec![entry]).is_err());
-
-                  let mut entry = api_entry();
-                  entry.coinbase_txid = "not-a-hash".into();
-                  assert!(recovered_escrow_state(vec![entry]).is_err());
-
-                  assert!(recovered_escrow_state(vec![api_entry(), api_entry()]).is_err());
-              }
-
-              #[test]
-              fn recovery_merge_preserves_entries_missing_from_api() {
-                  let old = state_entry("aa", 1);
+              fn preserves_entries_missing_from_api() {
+                  let old = entry("aa", 1);
                   let existing = escrow::EscrowState { entries: vec![old.clone()] };
-                  let recovered = escrow::EscrowState::default();
-                  let (merged, added) = merge_recovered_escrow_state(existing, recovered).unwrap();
+                  let (merged, added) = merge_recovered_escrow_state(existing, escrow::EscrowState::default()).unwrap();
                   assert_eq!(added, 0);
                   assert_eq!(merged.entries.len(), 1);
                   assert_eq!(merged.entries[0].coinbase_txid, old.coinbase_txid);
               }
 
               #[test]
-              fn recovery_merge_adds_only_new_outpoints() {
-                  let existing = escrow::EscrowState { entries: vec![state_entry("aa", 1)] };
-                  let recovered = escrow::EscrowState { entries: vec![state_entry("bb", 2)] };
+              fn adds_only_new_outpoints() {
+                  let existing = escrow::EscrowState { entries: vec![entry("aa", 1)] };
+                  let recovered = escrow::EscrowState { entries: vec![entry("bb", 2)] };
                   let (merged, added) = merge_recovered_escrow_state(existing, recovered).unwrap();
                   assert_eq!(added, 1);
                   assert_eq!(merged.entries.len(), 2);
               }
 
               #[test]
-              fn recovery_merge_never_resets_existing_terminal_status() {
-                  let mut old = state_entry("aa", 1);
+              fn duplicate_does_not_reset_local_status_or_csv_window() {
+                  let mut old = entry("aa", 1);
                   old.claimed = true;
                   old.slashed = true;
                   old.csv_window = 792_000;
-                  let mut api_copy = old.clone();
-                  api_copy.claimed = false;
-                  api_copy.slashed = false;
-                  api_copy.csv_window = 36_000;
+                  let mut recovered = old.clone();
+                  recovered.claimed = false;
+                  recovered.slashed = false;
+                  recovered.csv_window = 36_000;
                   let (merged, added) = merge_recovered_escrow_state(
                       escrow::EscrowState { entries: vec![old] },
-                      escrow::EscrowState { entries: vec![api_copy] },
+                      escrow::EscrowState { entries: vec![recovered] },
                   )
                   .unwrap();
                   assert_eq!(added, 0);
@@ -354,15 +192,15 @@ jobs:
               }
 
               #[test]
-              fn recovery_merge_rejects_duplicate_existing_outpoints() {
-                  let entry = state_entry("aa", 1);
-                  let existing = escrow::EscrowState { entries: vec![entry.clone(), entry] };
+              fn rejects_duplicate_existing_outpoints() {
+                  let e = entry("aa", 1);
+                  let existing = escrow::EscrowState { entries: vec![e.clone(), e] };
                   assert!(merge_recovered_escrow_state(existing, escrow::EscrowState::default()).is_err());
               }
 
               #[test]
-              fn recovery_merge_rejects_metadata_mismatch() {
-                  let old = state_entry("aa", 1);
+              fn rejects_metadata_mismatch_for_same_outpoint() {
+                  let old = entry("aa", 1);
                   let mut changed = old.clone();
                   changed.amount_sompi += 1;
                   assert!(merge_recovered_escrow_state(
@@ -373,7 +211,7 @@ jobs:
               }
 
               #[test]
-              fn recovery_load_fails_closed_on_corrupt_existing_file() {
+              fn corrupt_existing_state_fails_closed() {
                   let dir = tempfile::tempdir().unwrap();
                   let path = dir.path().join("escrow_state.json");
                   fs::write(&path, b"{broken").unwrap();
@@ -381,38 +219,26 @@ jobs:
                   assert_eq!(fs::read(&path).unwrap(), b"{broken");
               }
           }
+
           '''
+              text = text.replace(test_marker, tests + test_marker, 1)
 
-          if old_tests not in text:
-              raise SystemExit("expected recovery_tests block not found; refusing blind patch")
-          text = text.replace(old_tests, new_tests, 1)
+          old_comment = "    // Recovery mode: rebuild escrow_state.json from the Keryx public API, then exit.\n"
+          new_comment = (
+              "    // Recovery mode: merge claimable UTXOs from the Keryx public API into the existing state, then exit.\n"
+              "    // Existing entries are authoritative and never deleted/reset; the current file is backed up first.\n"
+          )
+          if old_comment in text:
+              text = text.replace(old_comment, new_comment, 1)
+          elif "Recovery mode: merge claimable UTXOs" not in text:
+              raise SystemExit("recovery comment marker missing; refusing blind patch")
 
-          old_recovery = r'''    // Recovery mode: rebuild escrow_state.json from the Keryx public API, then exit.
-              // Must run before escrow key loading to avoid creating a new random key on disk.
-              // Uses escrow.key to derive the pubkey — only claimable UTXOs are returned.
-          '''
-          new_recovery = r'''    // Recovery mode: merge claimable UTXOs from the Keryx public API into the existing
-              // escrow_state.json, then exit. Existing entries are authoritative and never deleted or
-              // reset by recovery; the current file is backed up before the atomic merged write.
-              // Must run before escrow key loading to avoid creating a new random key on disk.
-              // Uses escrow.key to derive the pubkey — only claimable UTXOs are returned.
-          '''
-          if old_recovery not in text:
-              raise SystemExit("expected recovery comment not found")
-          text = text.replace(old_recovery, new_recovery, 1)
-
-          old_save = r'''        let (state, total_sompi) = recovered_escrow_state(api_entries)?;
-              let count = state.entries.len();
-              if shutdown_requested.load(Ordering::Acquire) {
-                  return Err("Shutdown requested before recovered escrow state was saved".into());
-              }
-              escrow::save_state_atomic(std::path::Path::new(&opt.escrow_state_file), &state)?;
-
-              info!("Recovered {} escrow entries — claimable: {:.4} KRX", count, total_sompi as f64 / 1e8);
-              info!("State saved to '{}'.", opt.escrow_state_file);
-          '''
-
-          new_save = r'''        let (recovered, api_total_sompi) = recovered_escrow_state(api_entries)?;
+          start_marker = "        let (state, total_sompi) = recovered_escrow_state(api_entries)?;\n"
+          end_marker = "        info!(\"State saved to '{}'.\", opt.escrow_state_file);\n"
+          if start_marker in text:
+              start = text.index(start_marker)
+              end = text.index(end_marker, start) + len(end_marker)
+              replacement = r'''        let (recovered, api_total_sompi) = recovered_escrow_state(api_entries)?;
               let api_count = recovered.entries.len();
               let state_path = std::path::Path::new(&opt.escrow_state_file);
               let existing = load_existing_escrow_state_for_recovery(state_path)?;
@@ -442,10 +268,9 @@ jobs:
               );
               info!("Merged state saved atomically to '{}'.", opt.escrow_state_file);
           '''
-
-          if old_save not in text:
-              raise SystemExit("expected destructive recovery save block not found; refusing blind patch")
-          text = text.replace(old_save, new_save, 1)
+              text = text[:start] + replacement + text[end:]
+          elif "Recovery merge complete" not in text:
+              raise SystemExit("destructive recovery save markers missing; refusing blind patch")
 
           path.write_text(text, encoding="utf-8")
 
@@ -458,8 +283,9 @@ jobs:
           set -euo pipefail
           git diff --check
           grep -q "Recovery merge complete" src/main.rs
-          grep -q "recovery_merge_preserves_entries_missing_from_api" src/main.rs
+          grep -q "preserves_entries_missing_from_api" src/main.rs
           grep -q "pre-recover" src/main.rs
+          ! grep -q "let (state, total_sompi) = recovered_escrow_state(api_entries)" src/main.rs
 
       - name: Commit safe recovery patch
         shell: bash
