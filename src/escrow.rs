@@ -1,7 +1,7 @@
 // Automated OPoI escrow claim module.
 //
 // After each block, scans for coinbase outputs matching this miner's escrow script.
-// When the CSV window (36 000 blocks) expires, builds a Schnorr-signed claim TX and
+// When each output's CSV window expires, builds a Schnorr-signed claim TX and
 // broadcasts it via gRPC.  State is persisted to `escrow_state.json` so claims survive
 // miner restarts.
 
@@ -649,9 +649,12 @@ impl EscrowWatcher {
         // often not enough, causing seq-lock rejections that get retried every block.
         // Per-entry cooldowns are checked individually so they don't block other claims.
         //
-        // Selection runs in priority passes; each pass builds its own candidate batch and
-        // the first RELEASABLE one wins, so a held-back pass never starves the ones below:
-        //   0 — nominal: uncapped live entries, inference first within the batch (they
+        // Selection runs in priority passes; each pass evaluates every eligible CSV window
+        // independently. This is critical across the H6 transition: a short legacy 36k
+        // window must not pin the pass and hide a full 792k service-bond batch behind it.
+        // Within a selected batch the window is still single-valued — inputs with different
+        // sequences/scripts are never mixed.
+        //   0 — nominal: uncapped live entries, inference first within each window (they
         //       carry user fees and must not be starved by the coinbase queue). Releasable
         //       ONLY as a full MAX_CLAIM_BATCH batch — the flat claim fee is amortized
         //       across the whole TX and partial batches never ship. Nominal goes FIRST so
@@ -664,70 +667,78 @@ impl EscrowWatcher {
         //       nothing fresher is claimable.
         // A batch never mixes passes: batching live entries with known-dead ones would let
         // one dead input orphan the whole TX and stall the live entries.
-        let mut batch: Vec<usize> = Vec::new();
-        let mut selected = false;
-        for pass in 0..3u8 {
-            batch.clear();
-            let mut limit = MAX_CLAIM_BATCH;
-            // A batch never mixes CSV windows: one sequence and one escrow script are
-            // signed for the whole TX. The first selected entry fixes the batch's window.
-            let mut batch_window: Option<u64> = None;
+        let mut selected_batch: Option<Vec<usize>> = None;
+        'passes: for pass in 0..3u8 {
             // Nominal pass: iterate inference entries first so they get batch priority;
             // the sort is stable, so queue order is preserved within each kind.
             let mut indices: Vec<usize> = (0..self.state.entries.len()).collect();
             if pass == 0 {
                 indices.sort_by_key(|&i| !self.state.entries[i].is_inference);
             }
-            for &i in &indices {
-                let e = &self.state.entries[i];
-                // Only the (transient, forgivable) flag decides the dead pool; the
-                // orphan_retries counter is the cumulative memory driving the permanent
-                // slash and must not keep an entry in the dead pool forever on its own.
+
+            let in_pass = |e: &EscrowEntry| {
                 let proven_dead = e.orphan_slashed;
-                let in_pass = match pass {
+                match pass {
                     0 => e.batch_cap == 0 && !proven_dead,
                     1 => e.batch_cap != 0 && !proven_dead,
                     _ => proven_dead,
-                };
-                if !in_pass {
-                    continue;
                 }
-                let eligible = !e.claimed
+            };
+            let eligible = |e: &EscrowEntry| {
+                !e.claimed
                     && !e.slashed
                     && daa_score >= e.confirm_daa + e.csv_window + 10
                     && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
-                    && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
-                if !eligible {
-                    continue;
-                }
-                if batch_window.map_or(false, |w| w != e.csv_window) {
-                    continue;
-                }
-                let cap = if e.batch_cap == 0 { MAX_CLAIM_BATCH } else { (e.batch_cap as usize).min(MAX_CLAIM_BATCH) };
-                if cap.min(limit) < batch.len() + 1 {
-                    continue; // joining would violate this entry's cap (or shrink below current size)
-                }
-                limit = limit.min(cap);
-                batch_window = Some(e.csv_window);
-                batch.push(i);
-                if batch.len() >= limit {
-                    break; // batch is full for this pass
-                }
-            }
-            let releasable = match pass {
-                // Nominal batches ship full or not at all (fee amortization).
-                0 => batch.len() >= MIN_CLAIM_BATCH,
-                // Repair and dead-pool batches flow at any size.
-                _ => !batch.is_empty(),
+                    && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index))
             };
-            if releasable {
-                selected = true;
-                break;
+
+            // Preserve deterministic first-seen window order. In the nominal pass the
+            // inference-first ordering is therefore preserved, but an underfilled window
+            // is skipped rather than blocking a later full window.
+            let mut windows: Vec<u64> = Vec::new();
+            for &i in &indices {
+                let e = &self.state.entries[i];
+                if in_pass(e) && eligible(e) && !windows.contains(&e.csv_window) {
+                    windows.push(e.csv_window);
+                }
+            }
+
+            for window in windows {
+                let mut candidate: Vec<usize> = Vec::new();
+                let mut limit = MAX_CLAIM_BATCH;
+                for &i in &indices {
+                    let e = &self.state.entries[i];
+                    if e.csv_window != window || !in_pass(e) || !eligible(e) {
+                        continue;
+                    }
+                    let cap = if e.batch_cap == 0 {
+                        MAX_CLAIM_BATCH
+                    } else {
+                        (e.batch_cap as usize).min(MAX_CLAIM_BATCH)
+                    };
+                    if cap.min(limit) < candidate.len() + 1 {
+                        continue; // joining would violate this entry's cap (or shrink below current size)
+                    }
+                    limit = limit.min(cap);
+                    candidate.push(i);
+                    if candidate.len() >= limit {
+                        break; // batch is full for this pass/window
+                    }
+                }
+
+                let releasable = match pass {
+                    // Nominal batches ship full or not at all (fee amortization).
+                    0 => candidate.len() >= MIN_CLAIM_BATCH,
+                    // Repair and dead-pool batches flow at any size.
+                    _ => !candidate.is_empty(),
+                };
+                if releasable {
+                    selected_batch = Some(candidate);
+                    break 'passes;
+                }
             }
         }
-        if !selected {
-            return None;
-        }
+        let batch = selected_batch?;
         let entries: Vec<EscrowEntry> = batch.iter().map(|&i| self.state.entries[i].clone()).collect();
 
         match self.build_claim_tx(&entries) {
@@ -798,6 +809,10 @@ impl EscrowWatcher {
                 outcome = SubmitResponseOutcome::Accepted { outputs: n_outputs as u64, amount_sompi };
             }
             Some(msg) => {
+                debug!(
+                    "EscrowWatcher: raw rejection for claim {} ({} output(s)): {}",
+                    claim_txid, n_outputs, msg
+                );
                 // Retriable rejections: sequence-lock timing races and orphan/dag-reorg
                 // situations where the source block is off the selected chain.
                 let is_orphan = msg.contains("orphan");
@@ -818,6 +833,19 @@ impl EscrowWatcher {
                             .collect()
                     })
                     .unwrap_or_default();
+                if !burned_set.is_empty() {
+                    let mut burned_outpoints: Vec<String> = burned_set
+                        .iter()
+                        .map(|(txid, index)| format!("{}:{}", txid, index))
+                        .collect();
+                    burned_outpoints.sort();
+                    debug!(
+                        "EscrowWatcher: node reported {} burned escrow outpoint(s) for claim {}: {:?}",
+                        burned_outpoints.len(),
+                        claim_txid,
+                        burned_outpoints
+                    );
+                }
                 let batch_rejected = n_outputs > 1;
                 let last_daa = self.last_daa_score;
                 // Bisection step: one dead input orphans the whole batch, but most members
@@ -1620,6 +1648,126 @@ mod tests {
 
     /// Payout address of the private key `0x11..11`, used as a payout key below.
     const TEST_PAYOUT_ADDRESS: &str = "keryx:qp8n2k7uklxq4aegau7vawtptkgxsja4kt99lpv6krctwpq8tpc65uyeddvzr";
+
+    fn selection_test_watcher() -> (tempfile::TempDir, EscrowWatcher) {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = EscrowWatcher::new(&"11".repeat(32), TEST_PAYOUT_ADDRESS, dir.path().join("state.json")).unwrap();
+        (dir, watcher)
+    }
+
+    fn selection_entry(id: u64, csv_window: u64, is_inference: bool) -> EscrowEntry {
+        EscrowEntry {
+            coinbase_txid: format!("{id:064x}"),
+            block_hash: if is_inference { String::new() } else { format!("{:064x}", id + 1_000_000) },
+            confirm_daa: 0,
+            amount_sompi: 100_000_000,
+            output_index: 1,
+            claimed: false,
+            slashed: false,
+            orphan_slashed: false,
+            orphan_retries: 0,
+            orphan_retry_after_daa: None,
+            submit_retries: 0,
+            batch_cap: 0,
+            cap_set_daa: 0,
+            is_inference,
+            csv_window,
+        }
+    }
+
+    fn mature_test_daa() -> u64 {
+        SERVICE_BOND_CSV_WINDOW_BLOCKS + 100
+    }
+
+    #[test]
+    fn legacy_small_window_does_not_block_full_bonded_batch() {
+        let (_dir, mut watcher) = selection_test_watcher();
+        for id in 1..=6 {
+            watcher.state.entries.push(selection_entry(id, CHALLENGE_WINDOW_BLOCKS, true));
+        }
+        for id in 7..=16 {
+            watcher.state.entries.push(selection_entry(id, CHALLENGE_WINDOW_BLOCKS, false));
+        }
+        for id in 17..=116 {
+            watcher.state.entries.push(selection_entry(id, SERVICE_BOND_CSV_WINDOW_BLOCKS, false));
+        }
+
+        let tx = watcher.find_claim(mature_test_daa()).expect("bonded full batch must bypass short legacy window");
+        assert_eq!(tx.inputs.len(), MAX_CLAIM_BATCH);
+        assert!(tx.inputs.iter().all(|input| input.sequence == SERVICE_BOND_CSV_WINDOW_BLOCKS));
+    }
+
+    #[test]
+    fn claim_batch_never_mixes_csv_windows() {
+        let (_dir, mut watcher) = selection_test_watcher();
+        for id in 1..=87 {
+            watcher.state.entries.push(selection_entry(id, CHALLENGE_WINDOW_BLOCKS, false));
+        }
+        for id in 88..=174 {
+            watcher.state.entries.push(selection_entry(id, SERVICE_BOND_CSV_WINDOW_BLOCKS, false));
+        }
+
+        let tx = watcher.find_claim(mature_test_daa()).expect("one full window must be claimable");
+        assert_eq!(tx.inputs.len(), MAX_CLAIM_BATCH);
+        let window = tx.inputs[0].sequence;
+        assert!(tx.inputs.iter().all(|input| input.sequence == window));
+    }
+
+    #[test]
+    fn nominal_partial_window_waits() {
+        let (_dir, mut watcher) = selection_test_watcher();
+        for id in 1..=86 {
+            watcher.state.entries.push(selection_entry(id, SERVICE_BOND_CSV_WINDOW_BLOCKS, false));
+        }
+
+        assert!(watcher.find_claim(mature_test_daa()).is_none());
+    }
+
+    #[test]
+    fn full_legacy_batch_still_claims() {
+        let (_dir, mut watcher) = selection_test_watcher();
+        for id in 1..=87 {
+            watcher.state.entries.push(selection_entry(id, CHALLENGE_WINDOW_BLOCKS, false));
+        }
+
+        let tx = watcher.find_claim(mature_test_daa()).expect("full legacy batch must remain claimable");
+        assert_eq!(tx.inputs.len(), MAX_CLAIM_BATCH);
+        assert!(tx.inputs.iter().all(|input| input.sequence == CHALLENGE_WINDOW_BLOCKS));
+    }
+
+    #[test]
+    fn inference_priority_is_preserved_within_a_window() {
+        let (_dir, mut watcher) = selection_test_watcher();
+        for id in 1..=86 {
+            watcher.state.entries.push(selection_entry(id, SERVICE_BOND_CSV_WINDOW_BLOCKS, false));
+        }
+        let inference_id = 999;
+        watcher.state.entries.push(selection_entry(inference_id, SERVICE_BOND_CSV_WINDOW_BLOCKS, true));
+
+        let tx = watcher.find_claim(mature_test_daa()).expect("full bonded batch must be claimable");
+        assert_eq!(tx.inputs.len(), MAX_CLAIM_BATCH);
+        assert_eq!(
+            tx.inputs[0].previous_outpoint.as_ref().unwrap().transaction_id,
+            format!("{inference_id:064x}")
+        );
+    }
+
+    #[test]
+    fn repair_batches_remain_single_window() {
+        let (_dir, mut watcher) = selection_test_watcher();
+        let mut legacy = selection_entry(1, CHALLENGE_WINDOW_BLOCKS, false);
+        legacy.batch_cap = 4;
+        watcher.state.entries.push(legacy);
+        for id in 2..=4 {
+            let mut bonded = selection_entry(id, SERVICE_BOND_CSV_WINDOW_BLOCKS, false);
+            bonded.batch_cap = 4;
+            watcher.state.entries.push(bonded);
+        }
+
+        let tx = watcher.find_claim(mature_test_daa()).expect("repair batch should flow at any size");
+        let window = tx.inputs[0].sequence;
+        assert!(tx.inputs.iter().all(|input| input.sequence == window));
+    }
 
     /// The service identity must equal the node's `miner_key(spk)`. The expected value is derived
     /// independently of this code: blake2b-256 keyed "TransactionHash" over
