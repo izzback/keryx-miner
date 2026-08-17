@@ -16,8 +16,8 @@ jobs:
       CARGO_TERM_COLOR: always
       KERYX_LLAMA_SKIP: "1"
       POM_SM_LIST: "89"
-      CARGO_PROFILE_RELEASE_LTO: "thin"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
     steps:
       - name: Checkout release branch
@@ -54,44 +54,20 @@ jobs:
         with:
           vsversion: "2022"
 
-      - name: Limit PoM PTX to RTX 5080 sm89 for this test binary only
+      - name: Limit embedded PoM PTX to RTX 5080 sm89 for this test binary only
         shell: pwsh
         run: |
           $p = 'src/pom_gpu.rs'
-          $t = Get-Content $p -Raw
-          $oldConsts = @'
-const PTX_SM90: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm90.ptx"));
-const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));
-const PTX_SM86: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm86.ptx"));
-const PTX_SM80: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm80.ptx"));
-const PTX_SM75: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm75.ptx"));
-const PTX_SM70: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm70.ptx"));
-const PTX_SM61: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm61.ptx"));
-'@
-          $newConsts = @'
-const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));
-'@
-          $oldCandidates = @'
-const POM_PTX_CANDIDATES: [(&str, &str, &str); 7] = [
-    ("pom_mine_mod_sm90", "sm_90", PTX_SM90),
-    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),
-    ("pom_mine_mod_sm86", "sm_86", PTX_SM86),
-    ("pom_mine_mod_sm80", "sm_80", PTX_SM80),
-    ("pom_mine_mod_sm75", "sm_75", PTX_SM75),
-    ("pom_mine_mod_sm70", "sm_70", PTX_SM70),
-    ("pom_mine_mod_sm61", "sm_61", PTX_SM61),
-];
-'@
-          $newCandidates = @'
-const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [
-    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),
-];
-'@
-          if (-not $t.Contains($oldConsts)) { throw 'PTX const block not found' }
-          if (-not $t.Contains($oldCandidates)) { throw 'PTX candidate block not found' }
-          $t = $t.Replace($oldConsts, $newConsts).Replace($oldCandidates, $newCandidates)
-          Set-Content $p $t -Encoding utf8
-          Write-Host 'Hosted build patched to sm89 only; source branch remains multi-arch.'
+          $lines = Get-Content $p
+          $lines = $lines | Where-Object {
+            $_ -notmatch '^const PTX_SM(90|86|80|75|70|61):' -and
+            $_ -notmatch 'pom_mine_mod_sm(90|86|80|75|70|61)'
+          }
+          $lines = $lines -replace 'POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\]', 'POM_PTX_CANDIDATES: [(&str, &str, &str); 1]'
+          Set-Content $p $lines -Encoding utf8
+          Select-String -Path $p -Pattern 'POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 1\]' | Out-Null
+          Select-String -Path $p -Pattern 'pom_mine_mod_sm89' | Out-Null
+          Write-Host 'Hosted package build limited to sm89; committed source remains multi-arch.'
 
       - name: Build miner and matched CUDA plugin only
         shell: pwsh
@@ -109,6 +85,9 @@ const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [
             if (-not (Test-Path $f)) { throw "Missing required runtime file: $f" }
             Write-Host "$f -> $((Get-Item $f).Length) bytes"
           }
+          if (Test-Path 'target/release/keryx-llama.dll') {
+            throw 'Unexpected keryx-llama.dll: this fast package must reuse the known-good existing llama runtime.'
+          }
 
       - name: Package test.4 without llama
         shell: pwsh
@@ -117,42 +96,32 @@ const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item target/release/keryx-miner.exe $dist/
           Copy-Item target/release/keryxcuda.dll $dist/
-          @"
-Keryx Miner v0.4.9-escrow-fix-test.4
-
-FAST TEST BUILD — safe escrow recovery + mixed CSV-window claim handling.
-
-IMPORTANT RUNTIME INSTRUCTION:
-- This ZIP intentionally does NOT contain keryx-llama.dll.
-- Reuse the SAME old keryx-llama.dll that already works on your machine with the previous miner/model runtime.
-- Put that working keryx-llama.dll beside the new keryx-miner.exe and keryxcuda.dll.
-- keryx-miner.exe and keryxcuda.dll in this ZIP MUST stay together because they come from the same Rust build.
-
-Build scope:
-- Windows x64
-- CUDA 12.9
-- RTX 5080 focused PoM PTX: sm_89 only
-- KERYX_LLAMA_SKIP=1 (llama runtime reused, not rebuilt)
-
-Safe --recover-escrow behavior:
-- existing escrow_state.json entries are preserved when the recovery API omits them;
-- API results are merged by txid + output_index;
-- existing claimed/slashed/retry/csv_window state is preserved;
-- corrupt/duplicate/conflicting state fails closed;
-- automatic pre-recovery .bak is created before writing;
-- merged entry count cannot become smaller than the existing state.
-
-Claim behavior:
-- 36,000 and 792,000 DAA windows remain separated;
-- H6 maturity remains 792,000 DAA per entry;
-- a short legacy window cannot block a full H6 batch;
-- detailed raw rejection / burned-outpoint diagnostics are enabled.
-
-LIVE TEST:
-- Work only from a COPY of the clean recovery JSON.
-- Never overwrite the clean master backup.
-- Keep and reuse the original escrow.key.
-"@ | Set-Content "$dist/README-TEST.txt" -Encoding utf8
+          @(
+            'Keryx Miner v0.4.9-escrow-fix-test.4',
+            '',
+            'FAST TEST BUILD - safe escrow recovery + mixed CSV-window claim handling.',
+            '',
+            'IMPORTANT:',
+            '- This ZIP intentionally does NOT contain keryx-llama.dll.',
+            '- Reuse the SAME old keryx-llama.dll that already works on your machine.',
+            '- Keep the new keryx-miner.exe and keryxcuda.dll together.',
+            '',
+            'Build: Windows x64 / CUDA 12.9 / RTX 5080 sm_89 / KERYX_LLAMA_SKIP=1.',
+            '',
+            'Recovery:',
+            '- --recover-escrow merges instead of replacing existing state.',
+            '- Existing entries and status fields are preserved.',
+            '- Automatic pre-recovery backup is created.',
+            '- Corrupt, duplicate, conflicting, or shrinking recovery fails closed.',
+            '',
+            'Claims:',
+            '- 36,000 and 792,000 DAA windows stay separate.',
+            '- Short legacy windows cannot block a full H6 batch.',
+            '- H6 maturity remains 792,000 DAA per entry.',
+            '- Detailed raw rejection and burned-outpoint diagnostics are enabled.',
+            '',
+            'LIVE TEST: use only a COPY of the clean recovery JSON and keep the original escrow.key.'
+          ) | Set-Content "$dist/README-TEST.txt" -Encoding utf8
 
           $hashLines = foreach ($f in @('keryx-miner.exe','keryxcuda.dll','README-TEST.txt')) {
             $h = (Get-FileHash "$dist/$f" -Algorithm SHA256).Hash.ToLower()
@@ -187,5 +156,5 @@ LIVE TEST:
             --repo $env:GITHUB_REPOSITORY `
             --target test/escrow-safe-recovery-v0.4.9-test.3 `
             --title 'Keryx Miner v0.4.9-escrow-fix-test.4' `
-            --notes 'FAST TEST prerelease. Safe non-destructive escrow recovery + 36k/792k claim fix. Windows RTX 5080/sm89 build. Ships matched keryx-miner.exe + keryxcuda.dll only; intentionally reuse your already-working old keryx-llama.dll. Built with KERYX_LLAMA_SKIP=1 to avoid rebuilding llama.cpp.' `
+            --notes 'FAST TEST prerelease. Safe non-destructive escrow recovery + 36k/792k claim fix. Windows RTX 5080/sm89 build. Ships matched keryx-miner.exe + keryxcuda.dll only; intentionally reuse the already-working old keryx-llama.dll. Built with KERYX_LLAMA_SKIP=1.' `
             --prerelease
