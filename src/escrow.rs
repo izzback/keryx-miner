@@ -721,7 +721,7 @@ impl EscrowWatcher {
                 let eligible = in_pass
                     && !e.claimed
                     && !e.slashed
-                    && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
+                    && daa_score >= e.confirm_daa + e.csv_window + 10
                     && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
                     && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
                 if eligible && !windows.iter().any(|&w| w == e.csv_window) {
@@ -747,7 +747,7 @@ impl EscrowWatcher {
                     let eligible = in_pass
                         && !e.claimed
                         && !e.slashed
-                        && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
+                        && daa_score >= e.confirm_daa + e.csv_window + 10
                         && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
                         && !self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
                     if !eligible {
@@ -1846,6 +1846,11 @@ mod tests {
             watcher.on_submit_response(&legacy_txid, None),
             SubmitResponseOutcome::Accepted { outputs: 16, .. }
         ));
+
+        assert!(
+            watcher.find_claim(100_000).is_none(),
+            "H6 escrows must remain locked until their own 792k CSV window matures"
+        );
 
         let h6_claim = watcher.find_claim(1_000_000).expect("H6 claim must follow legacy cleanup");
         assert_eq!(h6_claim.inputs.len(), MAX_CLAIM_BATCH);
