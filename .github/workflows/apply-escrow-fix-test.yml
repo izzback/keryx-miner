@@ -14,7 +14,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       KERYX_LLAMA_SKIP: "1"
-      POM_SM_LIST: "89"
+      POM_SM_LIST: "90,89,86,80,75,70,61"
       KERYX_LLAMA_ARCHS: "89-virtual"
     steps:
       - name: Checkout test branch
