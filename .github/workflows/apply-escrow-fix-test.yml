@@ -45,6 +45,8 @@ jobs:
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          vsversion: "2022"
 
       - name: Verify targeted escrow regression test
         run: cargo test --lib legacy_escrows_are_claimed_before_h6_batch_and_h6_cycle_continues -- --exact
