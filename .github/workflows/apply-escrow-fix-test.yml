@@ -28,6 +28,12 @@ jobs:
       - name: Format patched source
         run: cargo fmt --all
 
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          choco install protoc -y --no-progress
+          protoc --version
+
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
