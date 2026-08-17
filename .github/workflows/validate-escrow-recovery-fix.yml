@@ -1,0 +1,86 @@
+name: Validate escrow recovery fix
+
+on:
+  push:
+    branches:
+      - fix/escrow-csv-window-claim-selection
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      KERYX_LLAMA_SKIP: "1"
+      POM_SM_LIST: "89"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install protoc and OpenCL loader headers
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler ocl-icd-opencl-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CUDA 12.9
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+
+      - name: Limit embedded PTX to sm89 for hosted validation
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          p = Path("src/pom_gpu.rs")
+          s = p.read_text(encoding="utf-8")
+          constants = re.compile(
+              r'const PTX_SM90:.*?const PTX_SM61:.*?;\n',
+              re.S,
+          )
+          s, n1 = constants.subn(
+              'const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));\n',
+              s,
+              count=1,
+          )
+          candidates = re.compile(
+              r'const POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\] = \[.*?\];',
+              re.S,
+          )
+          s, n2 = candidates.subn(
+              'const POM_PTX_CANDIDATES: [(&str, &str, &str); 1] = [\n'
+              '    ("pom_mine_mod_sm89", "sm_89", PTX_SM89),\n'
+              '];',
+              s,
+              count=1,
+          )
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f"sm89 patch failed: constants={n1} candidates={n2}")
+          p.write_text(s, encoding="utf-8")
+
+      - name: Compile all keryx-miner binary unit tests
+        shell: bash
+        run: cargo test -p keryx-miner --bin keryx-miner --no-run
+
+      - name: Run safe recovery merge tests
+        shell: bash
+        run: cargo test -p keryx-miner --bin keryx-miner safe_recovery_merge_tests -- --nocapture
+
+      - name: Run recovery API validation tests
+        shell: bash
+        run: cargo test -p keryx-miner --bin keryx-miner recovery_tests -- --nocapture
+
+      - name: Run escrow CSV-window selection regression tests
+        shell: bash
+        run: |
+          cargo test -p keryx-miner --bin keryx-miner legacy_small_window_does_not_block_full_bonded_batch -- --nocapture
+          cargo test -p keryx-miner --bin keryx-miner claim_batch_never_mixes_csv_windows -- --nocapture
+          cargo test -p keryx-miner --bin keryx-miner nominal_partial_window_waits -- --nocapture
+          cargo test -p keryx-miner --bin keryx-miner full_legacy_batch_still_claims -- --nocapture
+          cargo test -p keryx-miner --bin keryx-miner repair_batches_remain_single_window -- --nocapture
