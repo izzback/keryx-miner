@@ -5,10 +5,10 @@ escrow = Path("src/escrow.rs")
 ui = Path("src/ui.rs")
 
 cargo_text = cargo.read_text(encoding="utf-8")
-old_version = 'version = "0.4.9-escrow-fix-test.4"'
+old_version = 'version = "0.4.9-escrow-fix-test.3"'
 new_version = 'version = "0.4.9-escrow-claim-progress-test.6"'
 if old_version not in cargo_text and new_version not in cargo_text:
-    raise SystemExit("expected test.4 Cargo version not found")
+    raise SystemExit("expected test.3 Cargo version not found")
 cargo_text = cargo_text.replace(old_version, new_version, 1)
 cargo.write_text(cargo_text, encoding="utf-8")
 
