@@ -1,7 +1,7 @@
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
 use log::Level;
 use std::collections::{HashMap, VecDeque};
@@ -35,61 +35,17 @@ struct Palette {
 }
 
 const PALETTE_TRUECOLOR: Palette = Palette {
-    bg: Color::Rgb {
-        r: 0x07,
-        g: 0x0a,
-        b: 0x08,
-    },
-    panel: Color::Rgb {
-        r: 0x0d,
-        g: 0x11,
-        b: 0x0d,
-    },
-    accent: Color::Rgb {
-        r: 0x23,
-        g: 0xd6,
-        b: 0x58,
-    },
-    text: Color::Rgb {
-        r: 0x6f,
-        g: 0xd5,
-        b: 0x83,
-    },
-    muted: Color::Rgb {
-        r: 0x35,
-        g: 0x44,
-        b: 0x3a,
-    },
-    ok: Color::Rgb {
-        r: 0x2e,
-        g: 0xe3,
-        b: 0x58,
-    },
-    dim: Color::Rgb {
-        r: 0x4f,
-        g: 0x9a,
-        b: 0x60,
-    },
-    bright: Color::Rgb {
-        r: 0x30,
-        g: 0xff,
-        b: 0x67,
-    },
-    warn: Color::Rgb {
-        r: 0xff,
-        g: 0xbf,
-        b: 0x3f,
-    },
-    mid: Color::Rgb {
-        r: 0x4e,
-        g: 0xcb,
-        b: 0x6a,
-    },
-    err: Color::Rgb {
-        r: 0xe0,
-        g: 0x52,
-        b: 0x52,
-    },
+    bg: Color::Rgb { r: 0x07, g: 0x0a, b: 0x08 },
+    panel: Color::Rgb { r: 0x0d, g: 0x11, b: 0x0d },
+    accent: Color::Rgb { r: 0x23, g: 0xd6, b: 0x58 },
+    text: Color::Rgb { r: 0x6f, g: 0xd5, b: 0x83 },
+    muted: Color::Rgb { r: 0x35, g: 0x44, b: 0x3a },
+    ok: Color::Rgb { r: 0x2e, g: 0xe3, b: 0x58 },
+    dim: Color::Rgb { r: 0x4f, g: 0x9a, b: 0x60 },
+    bright: Color::Rgb { r: 0x30, g: 0xff, b: 0x67 },
+    warn: Color::Rgb { r: 0xff, g: 0xbf, b: 0x3f },
+    mid: Color::Rgb { r: 0x4e, g: 0xcb, b: 0x6a },
+    err: Color::Rgb { r: 0xe0, g: 0x52, b: 0x52 },
 };
 
 const PALETTE_ANSI: Palette = Palette {
@@ -108,13 +64,7 @@ const PALETTE_ANSI: Palette = Palette {
 
 fn palette() -> Palette {
     static CHOSEN: OnceLock<Palette> = OnceLock::new();
-    *CHOSEN.get_or_init(|| {
-        if supports_truecolor() {
-            PALETTE_TRUECOLOR
-        } else {
-            PALETTE_ANSI
-        }
-    })
+    *CHOSEN.get_or_init(|| if supports_truecolor() { PALETTE_TRUECOLOR } else { PALETTE_ANSI })
 }
 
 fn supports_truecolor() -> bool {
@@ -128,9 +78,7 @@ fn supports_truecolor() -> bool {
         }
     }
 
-    let colorterm = env::var("COLORTERM")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let colorterm = env::var("COLORTERM").unwrap_or_default().to_ascii_lowercase();
     if colorterm.contains("truecolor") || colorterm.contains("24bit") {
         return true;
     }
@@ -154,10 +102,7 @@ pub struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self {
-            lines: Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)),
-            scrollback_lines: AtomicU64::new(0),
-        }
+        Self { lines: Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)), scrollback_lines: AtomicU64::new(0) }
     }
 
     pub fn push_log(&self, level: Level, message: &str) {
@@ -173,11 +118,9 @@ impl UiState {
             if self.scrollback_lines.load(Ordering::Acquire) > 0 {
                 let max_offset = lines.len().saturating_sub(1) as u64;
                 let current = self.scrollback_lines.load(Ordering::Acquire);
-                self.scrollback_lines
-                    .store(current.saturating_add(1).min(max_offset), Ordering::Release);
+                self.scrollback_lines.store(current.saturating_add(1).min(max_offset), Ordering::Release);
             }
         }
-
     }
 
     fn visible_lines(&self, n: usize) -> Vec<String> {
@@ -193,20 +136,17 @@ impl UiState {
         let len = self.lines.lock().expect("ui log mutex poisoned").len();
         let max_offset = len.saturating_sub(1) as u64;
         let current = self.scrollback_lines.load(Ordering::Acquire);
-        self.scrollback_lines
-            .store(current.saturating_add(amount as u64).min(max_offset), Ordering::Release);
+        self.scrollback_lines.store(current.saturating_add(amount as u64).min(max_offset), Ordering::Release);
     }
 
     fn scroll_down(&self, amount: usize) {
         let current = self.scrollback_lines.load(Ordering::Acquire);
-        self.scrollback_lines
-            .store(current.saturating_sub(amount as u64), Ordering::Release);
+        self.scrollback_lines.store(current.saturating_sub(amount as u64), Ordering::Release);
     }
 
     fn scroll_to_top(&self) {
         let len = self.lines.lock().expect("ui log mutex poisoned").len();
-        self.scrollback_lines
-            .store(len.saturating_sub(1) as u64, Ordering::Release);
+        self.scrollback_lines.store(len.saturating_sub(1) as u64, Ordering::Release);
     }
 
     fn scroll_to_live(&self) {
@@ -263,8 +203,8 @@ fn tty_timestamp() -> String {
     let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     OffsetDateTime::now_utc()
         .format(&format)
-    .map(|stamp| format!("{} UTC", stamp))
-    .unwrap_or_else(|_| "0000-00-00 00:00:00 UTC".to_string())
+        .map(|stamp| format!("{} UTC", stamp))
+        .unwrap_or_else(|_| "0000-00-00 00:00:00 UTC".to_string())
 }
 
 pub struct UiGuard {
@@ -300,9 +240,7 @@ pub fn spawn_ui(stats: Arc<MinerStats>, ui_state: Arc<UiState>, shutdown_request
             if handle_input(&ui_state, &shutdown_requested) {
                 break;
             }
-            let current_size = terminal::size()
-                .ok()
-                .filter(|(w, h)| *w > 0 && *h > 0);
+            let current_size = terminal::size().ok().filter(|(w, h)| *w > 0 && *h > 0);
 
             let Some(current_size) = current_size else {
                 thread::sleep(REDRAW_RATE);
@@ -353,10 +291,7 @@ pub fn spawn_ui(stats: Arc<MinerStats>, ui_state: Arc<UiState>, shutdown_request
         let _ = disable_raw_mode();
     });
 
-    UiGuard {
-        stop,
-        handle: Some(handle),
-    }
+    UiGuard { stop, handle: Some(handle) }
 }
 
 fn wait_for_stable_terminal_size() -> Option<(u16, u16)> {
@@ -380,10 +315,7 @@ enum PanelRow {
 }
 
 fn metric_row(label: &str, value: String, value_color: Color) -> PanelRow {
-    PanelRow::Segments(vec![
-        (format!(" {:<16}", label), palette().dim),
-        (value, value_color),
-    ])
+    PanelRow::Segments(vec![(format!(" {:<16}", label), palette().dim), (value, value_color)])
 }
 
 fn draw_frame(
@@ -402,14 +334,9 @@ fn draw_frame(
     let _ = queue!(out, MoveTo(0, 0), SetBackgroundColor(palette().bg));
 
     let kernel_by_device: HashMap<u32, keryx_miner::pom_gpu::GpuKernelInfo> =
-        keryx_miner::pom_gpu::list_gpu_kernel_info()
-            .into_iter()
-            .map(|k| (k.device_id, k))
-            .collect();
+        keryx_miner::pom_gpu::list_gpu_kernel_info().into_iter().map(|k| (k.device_id, k)).collect();
     let loaded_model_by_device: HashMap<u32, String> =
-        keryx_miner::pom_gpu::list_mining_model_labels()
-            .into_iter()
-            .collect();
+        keryx_miner::pom_gpu::list_mining_model_labels().into_iter().collect();
 
     // Bias layout toward the device pane, but keep left metrics moderately large: ~43% / ~57%.
     let left_w = total_width.saturating_sub(1) * 43 / 100;
@@ -422,16 +349,20 @@ fn draw_frame(
     let opoi_pause_value = if snapshot.opoi_challenge_active { "Active" } else { "Idle" };
     let accepted_blocks_value = snapshot.accepted_blocks;
     let rejected_value = snapshot.rejected_blocks;
-    let claims_value = format!(
-        "{} ({:.2} KRX)",
-        snapshot.claimed_outputs,
-        snapshot.claimed_sompi as f64 / 1e8
-    );
-    let escrow_pending_value = format!(
-        "{} ({:.2} KRX)",
-        snapshot.escrow_pending_outputs,
-        snapshot.escrow_pending_sompi as f64 / 1e8
-    );
+    let claims_value = format!("{} ({:.2} KRX)", snapshot.claimed_outputs, snapshot.claimed_sompi as f64 / 1e8);
+    let escrow_pending_value =
+        format!("{} ({:.2} KRX)", snapshot.escrow_pending_outputs, snapshot.escrow_pending_sompi as f64 / 1e8);
+    let claim_progress = crate::escrow::claim_progress_snapshot();
+    let claim_progress_value = match claim_progress.eta_seconds {
+        Some(0) => format!("{}/{} · ready", claim_progress.valid_outputs, claim_progress.target_outputs),
+        Some(seconds) => format!(
+            "{}/{} · ~{}",
+            claim_progress.valid_outputs,
+            claim_progress.target_outputs,
+            format_duration(seconds)
+        ),
+        None => format!("{}/{} · waiting", claim_progress.valid_outputs, claim_progress.target_outputs),
+    };
     let uptime_value = format_duration(snapshot.uptime_s);
     let last_update_age = seconds_since(snapshot.last_update_epoch_s);
     let last_update_value = format!("{}s ago", last_update_age);
@@ -447,26 +378,14 @@ fn draw_frame(
             } else {
                 palette().ok
             };
-            (
-                format!(
-                    "{:.1}/{:.1} GB ({}%)",
-                    used_mb as f64 / 1024.0,
-                    total_mb as f64 / 1024.0,
-                    used_pct
-                ),
-                color,
-            )
+            (format!("{:.1}/{:.1} GB ({}%)", used_mb as f64 / 1024.0, total_mb as f64 / 1024.0, used_pct), color)
         }
         _ => ("--".to_string(), palette().muted),
     };
     let (load_value, load_color) = match load_average_summary() {
         Some((load_1m, load_5m, load_15m)) => {
             let cores = std::thread::available_parallelism().ok().map(|n| n.get()).unwrap_or(1) as f64;
-            let pct = if cores > 0.0 {
-                ((load_1m / cores) * 100.0).round().clamp(0.0, 999.0) as u32
-            } else {
-                0
-            };
+            let pct = if cores > 0.0 { ((load_1m / cores) * 100.0).round().clamp(0.0, 999.0) as u32 } else { 0 };
             let color = if pct >= 95 {
                 palette().err
             } else if pct >= 80 {
@@ -476,22 +395,12 @@ fn draw_frame(
             } else {
                 palette().ok
             };
-            (
-                format!("{:.2}/{:.2}/{:.2}", load_1m, load_5m, load_15m),
-                color,
-            )
+            (format!("{:.2}/{:.2}/{:.2}", load_1m, load_5m, load_15m), color)
         }
         None => ("--".to_string(), palette().muted),
     };
-    let address_value = snapshot
-        .mining_address
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("(recovery mode)");
-    let api_port_value = snapshot
-        .api_port
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "--".to_string());
+    let address_value = snapshot.mining_address.as_deref().filter(|s| !s.is_empty()).unwrap_or("(recovery mode)");
+    let api_port_value = snapshot.api_port.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
     let address_metric = truncate_middle(address_value, left_w.saturating_sub(12));
     let log_mode_value = if ui_state.is_scrolled() {
         format!("{} +{}", uppercase_first_char("scrolled"), ui_state.scrollback_lines())
@@ -516,11 +425,7 @@ fn draw_frame(
         ("| OPoI ".to_string(), palette().muted),
         (
             format!("{}  ", opoi_pause_value),
-            if snapshot.opoi_challenge_active {
-                palette().bright
-            } else {
-                palette().dim
-            },
+            if snapshot.opoi_challenge_active { palette().bright } else { palette().dim },
         ),
         ("| Strike ".to_string(), palette().muted),
         (
@@ -546,14 +451,7 @@ fn draw_frame(
         (load_value, load_color),
     ];
 
-    draw_colored_segments_cell(
-        out,
-        0,
-        0,
-        left_w,
-        &top_left,
-        palette().panel,
-    );
+    draw_colored_segments_cell(out, 0, 0, left_w, &top_left, palette().panel);
     draw_colored_cell(out, divider_x, 0, 1, "|", palette().muted, palette().panel, false);
     draw_colored_segments_cell(out, right_x, 0, right_w, &top_right, palette().panel);
 
@@ -561,17 +459,10 @@ fn draw_frame(
     let content_budget = available_content_rows.max(4);
 
     let mut left_rows: Vec<PanelRow> = vec![
-        PanelRow::Plain {
-            text: " Metrics".to_string(),
-            fg: palette().accent,
-            bold: true,
-        },
+        PanelRow::Plain { text: " Metrics".to_string(), fg: palette().accent, bold: true },
         metric_row("Hashrate", hashrate_value.clone(), palette().ok),
         metric_row("Uptime", uptime_value.clone(), palette().text),
-        PanelRow::Segments(vec![
-            (format!(" {:<16}", "Address"), palette().dim),
-            (address_metric, palette().ok),
-        ]),
+        PanelRow::Segments(vec![(format!(" {:<16}", "Address"), palette().dim), (address_metric, palette().ok)]),
         metric_row("Blocks Accepted", accepted_blocks_value.to_string(), palette().bright),
         metric_row(
             "Blocks Rejected",
@@ -589,6 +480,17 @@ fn draw_frame(
             if snapshot.escrow_pending_outputs > 0 { palette().text } else { palette().dim },
         ),
         metric_row(
+            "Next Claim",
+            claim_progress_value,
+            if claim_progress.valid_outputs >= claim_progress.target_outputs {
+                palette().bright
+            } else if claim_progress.valid_outputs > 0 {
+                palette().text
+            } else {
+                palette().dim
+            },
+        ),
+        metric_row(
             "Stats Updated",
             last_update_value,
             if last_update_age <= 3 { palette().ok } else { palette().warn },
@@ -598,38 +500,20 @@ fn draw_frame(
             log_mode_value.clone(),
             if ui_state.is_scrolled() { palette().bright } else { palette().dim },
         ),
-        PanelRow::Plain {
-            text: "".to_string(),
-            fg: palette().text,
-            bold: false,
-        },
-        PanelRow::Plain {
-            text: " Controls".to_string(),
-            fg: palette().accent,
-            bold: true,
-        },
+        PanelRow::Plain { text: "".to_string(), fg: palette().text, bold: false },
+        PanelRow::Plain { text: " Controls".to_string(), fg: palette().accent, bold: true },
         PanelRow::Plain {
             text: if compact { " U/D Scroll" } else { " Up/Down      Scroll" }.to_string(),
             fg: palette().text,
             bold: false,
         },
         PanelRow::Plain {
-            text: if compact {
-                " Pg Fast"
-            } else {
-                " PgUp/PgDn    Scroll faster"
-            }
-            .to_string(),
+            text: if compact { " Pg Fast" } else { " PgUp/PgDn    Scroll faster" }.to_string(),
             fg: palette().text,
             bold: false,
         },
         PanelRow::Plain {
-            text: if compact {
-                " Home/End L/O"
-            } else {
-                " Home/End     Oldest/Live"
-            }
-            .to_string(),
+            text: if compact { " Home/End L/O" } else { " Home/End     Oldest/Live" }.to_string(),
             fg: palette().text,
             bold: false,
         },
@@ -640,11 +524,7 @@ fn draw_frame(
     }
 
     let mut right_rows: Vec<PanelRow> = Vec::new();
-    right_rows.push(PanelRow::Plain {
-        text: " Devices".to_string(),
-        fg: palette().accent,
-        bold: true,
-    });
+    right_rows.push(PanelRow::Plain { text: " Devices".to_string(), fg: palette().accent, bold: true });
 
     let id_w = if compact { 3usize } else { 4usize };
     let model_w = if compact { 10usize } else { 14usize };
@@ -652,11 +532,7 @@ fn draw_frame(
     let cc_w = if compact { 3usize } else { 5usize };
     let cm_w = if compact { 7usize } else { 9usize };
     let fan_w = 4usize;
-    let bar_w = if compact {
-        (right_w / 10).clamp(3, 7)
-    } else {
-        (right_w / 8).clamp(5, 11)
-    };
+    let bar_w = if compact { (right_w / 10).clamp(3, 7) } else { (right_w / 8).clamp(5, 11) };
     let free_w = right_w.saturating_sub(id_w + model_w + rate_w + cc_w + cm_w + fan_w + bar_w + 12);
     // Keep Loaded Model closer to Kernel: trim Kernel by ~5 chars when possible.
     let kernel_min = if compact { 7 } else { 10 };
@@ -688,13 +564,7 @@ fn draw_frame(
         bold: true,
     });
 
-    let max_rate = snapshot
-        .devices
-        .iter()
-        .map(|d| d.hashrate_hs)
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    let max_rate = snapshot.devices.iter().map(|d| d.hashrate_hs).max().unwrap_or(1).max(1);
 
     let max_device_rows = ((content_budget.saturating_sub(2)) / 2).max(1);
     let shown = snapshot.devices.len().min(max_device_rows);
@@ -710,43 +580,25 @@ fn draw_frame(
                 (compute, k.image.clone())
             })
             .unwrap_or_else(|| ("n/a".to_string(), "n/a".to_string()));
-        let loaded_model = dev_id
-            .and_then(|id| loaded_model_by_device.get(&id).cloned())
-            .unwrap_or_else(|| "n/a".to_string());
+        let loaded_model =
+            dev_id.and_then(|id| loaded_model_by_device.get(&id).cloned()).unwrap_or_else(|| "n/a".to_string());
 
-        let load_blocks = (((d.hashrate_hs as f64 / max_rate as f64) * bar_w as f64).round() as usize)
-            .clamp(0, bar_w);
+        let load_blocks = (((d.hashrate_hs as f64 / max_rate as f64) * bar_w as f64).round() as usize).clamp(0, bar_w);
         let load_bar = format!("{}{}", "=".repeat(load_blocks), ".".repeat(bar_w.saturating_sub(load_blocks)));
-        let id_short = parse_device_id(&d.id)
-            .map(|id| format!("#{}", id))
-            .unwrap_or_else(|| trim_to_width(&d.id, id_w));
+        let id_short =
+            parse_device_id(&d.id).map(|id| format!("#{}", id)).unwrap_or_else(|| trim_to_width(&d.id, id_w));
         let model_short = trim_to_width(&short_device_model(&d.id), model_w);
         let rate_short = trim_to_width(&format_hashrate(d.hashrate_hs), rate_w);
         let temp = d.temp_c.map(|v| format!("{}C", v)).unwrap_or_else(|| "--".to_string());
-        let mem = d
-            .memory_temp_c
-            .map(|v| format!("{}C", v))
-            .unwrap_or_else(|| "--".to_string());
+        let mem = d.memory_temp_c.map(|v| format!("{}C", v)).unwrap_or_else(|| "--".to_string());
         let core_mem = trim_to_width(&format!("{}/{}", temp, mem), cm_w);
-        let fan = d
-            .fan_percent
-            .map(|v| format!("{}%", v))
-            .unwrap_or_else(|| "--".to_string());
+        let fan = d.fan_percent.map(|v| format!("{}%", v)).unwrap_or_else(|| "--".to_string());
         let kernel_short = trim_to_width(&kernel, kernel_w);
         let loaded_short = trim_to_width(&loaded_model, loaded_w);
-        let power_short = d
-            .power_draw_w
-            .map(format_power_draw)
-            .unwrap_or_else(|| "--".to_string());
-        let efficiency_short = d
-            .power_draw_w
-            .map(|w| format_efficiency(d.hashrate_hs, w))
-            .unwrap_or_else(|| "--".to_string());
-        let detail_color = if power_short == "--" || efficiency_short == "--" {
-            palette().muted
-        } else {
-            palette().ok
-        };
+        let power_short = d.power_draw_w.map(format_power_draw).unwrap_or_else(|| "--".to_string());
+        let efficiency_short =
+            d.power_draw_w.map(|w| format_efficiency(d.hashrate_hs, w)).unwrap_or_else(|| "--".to_string());
+        let detail_color = if power_short == "--" || efficiency_short == "--" { palette().muted } else { palette().ok };
         let brand_color = device_brand_color(&d.id);
         right_rows.push(PanelRow::Segments(vec![
             (
@@ -843,14 +695,7 @@ fn draw_frame(
     }
 
     let separator_y = content_rows as u16 + 1;
-    draw_colored_line(
-        out,
-        separator_y,
-        &"-".repeat(total_width),
-        palette().muted,
-        Some(palette().panel),
-        false,
-    );
+    draw_colored_line(out, separator_y, &"-".repeat(total_width), palette().muted, Some(palette().panel), false);
 
     let log_header_y = separator_y + 1;
     draw_colored_segments_cell(
@@ -861,10 +706,7 @@ fn draw_frame(
         &[
             (" Logs ".to_string(), palette().accent),
             ("| ".to_string(), palette().muted),
-            (
-                format!("{}  ", log_mode_value),
-                if ui_state.is_scrolled() { palette().bright } else { palette().dim },
-            ),
+            (format!("{}  ", log_mode_value), if ui_state.is_scrolled() { palette().bright } else { palette().dim }),
             (
                 if compact {
                     "| U/D Scroll  Pg Fast  Home/End"
@@ -888,14 +730,7 @@ fn draw_frame(
             break;
         }
         let clipped = trim_to_width(line, total_width);
-        draw_colored_segments_cell(
-            out,
-            0,
-            y,
-            total_width,
-            &[(clipped, color_for_log_line(line))],
-            palette().bg,
-        );
+        draw_colored_segments_cell(out, 0, y, total_width, &[(clipped, color_for_log_line(line))], palette().bg);
     }
 
     // Clear any remaining rows in the log panel (mostly relevant during startup / resize).
@@ -907,14 +742,7 @@ fn draw_frame(
     let _ = out.flush();
 }
 
-fn draw_colored_line(
-    out: &mut std::io::Stdout,
-    y: u16,
-    text: &str,
-    fg: Color,
-    bg: Option<Color>,
-    bold: bool,
-) {
+fn draw_colored_line(out: &mut std::io::Stdout, y: u16, text: &str, fg: Color, bg: Option<Color>, bold: bool) {
     let _ = queue!(out, MoveTo(0, y));
     if let Some(bg) = bg {
         let _ = queue!(out, SetBackgroundColor(bg));
@@ -993,7 +821,10 @@ fn color_for_log_line(line: &str) -> Color {
         palette().mid
     } else if lower.contains("escrowwatcher") && lower.contains("claim accepted") {
         palette().bright
-    } else if lower.contains("found a block") || lower.contains("found a share") || lower.contains("block submitted successfully") {
+    } else if lower.contains("found a block")
+        || lower.contains("found a share")
+        || lower.contains("block submitted successfully")
+    {
         palette().bright
     } else {
         palette().text
@@ -1068,18 +899,12 @@ fn system_memory_summary() -> Option<(u64, u64)> {
 }
 
 fn parse_meminfo_kb(value: &str) -> Option<u64> {
-    value
-        .split_whitespace()
-        .next()
-        .and_then(|x| x.parse::<u64>().ok())
+    value.split_whitespace().next().and_then(|x| x.parse::<u64>().ok())
 }
 
 fn load_average_summary() -> Option<(f64, f64, f64)> {
     let loadavg = std::fs::read_to_string("/proc/loadavg").ok()?;
-    let mut values = loadavg
-        .split_whitespace()
-        .take(3)
-        .map(|v| v.parse::<f64>().ok());
+    let mut values = loadavg.split_whitespace().take(3).map(|v| v.parse::<f64>().ok());
     let load_1m = values.next().flatten()?;
     let load_5m = values.next().flatten()?;
     let load_15m = values.next().flatten()?;
@@ -1094,8 +919,7 @@ fn handle_input(ui_state: &UiState, shutdown_requested: &AtomicBool) -> bool {
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+        if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             let mut out = stdout();
             let _ = execute!(out, Show, LeaveAlternateScreen);
@@ -1184,30 +1008,17 @@ fn format_efficiency(hashrate_hs: u64, power_w: f32) -> String {
 }
 
 fn parse_device_id(worker_id: &str) -> Option<u32> {
-    worker_id
-        .strip_prefix('#')
-        .and_then(|s| s.split_whitespace().next())
-        .and_then(|s| s.parse::<u32>().ok())
+    worker_id.strip_prefix('#').and_then(|s| s.split_whitespace().next()).and_then(|s| s.parse::<u32>().ok())
 }
 
 fn short_device_model(worker_id: &str) -> String {
-    let raw = worker_id
-        .split_once('(')
-        .and_then(|(_, rhs)| rhs.strip_suffix(')'))
-        .unwrap_or(worker_id)
-        .trim();
+    let raw = worker_id.split_once('(').and_then(|(_, rhs)| rhs.strip_suffix(')')).unwrap_or(worker_id).trim();
 
     let lower = raw.to_ascii_lowercase();
     let cleaned = if lower.contains("nvidia") {
-        raw.replace("NVIDIA", "")
-            .replace("GeForce", "")
-            .replace("Corporation", "")
-            .replace("Graphics Device", "")
+        raw.replace("NVIDIA", "").replace("GeForce", "").replace("Corporation", "").replace("Graphics Device", "")
     } else if lower.contains("amd") || lower.contains("radeon") {
-        raw.replace("Advanced Micro Devices, Inc.", "")
-            .replace("AMD", "")
-            .replace("Radeon", "")
-            .replace("Graphics", "")
+        raw.replace("Advanced Micro Devices, Inc.", "").replace("AMD", "").replace("Radeon", "").replace("Graphics", "")
     } else {
         raw.to_string()
     };
@@ -1233,4 +1044,3 @@ fn uppercase_first_char(s: &str) -> String {
         None => String::new(),
     }
 }
-

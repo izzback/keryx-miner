@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 use tempfile::NamedTempFile;
@@ -126,6 +127,35 @@ const MAX_CLAIM_BATCH: usize = 87;
 /// with no expiry and no slash risk. Repair batches (bisection caps, dead-pool grinding)
 /// are exempt and keep flowing at any size so dead inputs still get isolated.
 const MIN_CLAIM_BATCH: usize = MAX_CLAIM_BATCH;
+
+/// UI-only estimate of the next nominal claim batch. Keryx currently targets ~10 BPS;
+/// the DAA countdown is authoritative and wall-clock time is deliberately shown as an estimate.
+const CLAIM_PROGRESS_ESTIMATED_BPS: u64 = 10;
+const CLAIM_PROGRESS_UNAVAILABLE: u64 = u64::MAX;
+static CLAIM_PROGRESS_VALID: AtomicU64 = AtomicU64::new(0);
+static CLAIM_PROGRESS_ETA_DAA: AtomicU64 = AtomicU64::new(CLAIM_PROGRESS_UNAVAILABLE);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimProgressSnapshot {
+    pub valid_outputs: u64,
+    pub target_outputs: u64,
+    pub eta_daa: Option<u64>,
+    pub eta_seconds: Option<u64>,
+}
+
+pub fn claim_progress_snapshot() -> ClaimProgressSnapshot {
+    let eta_raw = CLAIM_PROGRESS_ETA_DAA.load(Ordering::Acquire);
+    let eta_daa = (eta_raw != CLAIM_PROGRESS_UNAVAILABLE).then_some(eta_raw);
+    let eta_seconds =
+        eta_daa.map(|daa| daa.saturating_add(CLAIM_PROGRESS_ESTIMATED_BPS - 1) / CLAIM_PROGRESS_ESTIMATED_BPS);
+    ClaimProgressSnapshot {
+        valid_outputs: CLAIM_PROGRESS_VALID.load(Ordering::Acquire),
+        target_outputs: MAX_CLAIM_BATCH as u64,
+        eta_daa,
+        eta_seconds,
+    }
+}
+
 /// A repair verdict (bisection cap, orphan-death flag) not re-confirmed by a fresh
 /// rejection for this many DAA (~1 h at 10 BPS) expires and the entry returns to the
 /// nominal full-batch flow. Bisection isolates a dead input within minutes; a verdict
@@ -408,6 +438,9 @@ impl EscrowWatcher {
             self.track_block_escrows(block, daa_score, &block_hash);
         }
 
+        // Publish progress before `find_claim` moves a ready batch into in-flight state,
+        // so the operator can actually see the transition to 87/87.
+        self.update_claim_progress(daa_score);
         let claim = self.find_claim(daa_score);
         self.maybe_flush();
         claim
@@ -487,6 +520,89 @@ impl EscrowWatcher {
             }
         }
         (outputs, sompi)
+    }
+
+    /// Publish the next nominal claim batch progress for the TUI.
+    ///
+    /// This mirrors the normal-pass eligibility rules used by `find_claim`: dead/repair
+    /// entries, cooldowns and in-flight outpoints are excluded, and each CSV window is
+    /// evaluated independently. The displayed cohort is the one that can reach 87 inputs
+    /// first. This is especially important across the 36k -> 792k transition: a small
+    /// legacy/inference cohort must never hide a nearly-ready 792k batch.
+    fn update_claim_progress(&self, daa_score: u64) {
+        // Mirror the one-time pre-H6 coinbase catch-up. It is allowed to ship a partial
+        // 36k batch, so report it as ready even when it is below the normal 87 target.
+        let mut legacy_ready = 0usize;
+        let mut legacy_total = 0u64;
+        for e in &self.state.entries {
+            let in_flight = self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index));
+            if !e.claimed
+                && !e.slashed
+                && !e.is_inference
+                && e.csv_window == CHALLENGE_WINDOW_BLOCKS
+                && e.batch_cap == 0
+                && !e.orphan_slashed
+                && e.orphan_retries == 0
+                && daa_score >= e.confirm_daa.saturating_add(CHALLENGE_WINDOW_BLOCKS).saturating_add(10)
+                && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
+                && !in_flight
+            {
+                legacy_ready += 1;
+                legacy_total = legacy_total.saturating_add(e.amount_sompi);
+                if legacy_ready >= MAX_CLAIM_BATCH {
+                    break;
+                }
+            }
+        }
+        if legacy_ready > 0 && legacy_total > CLAIM_FEE_SOMPI {
+            CLAIM_PROGRESS_VALID.store(legacy_ready as u64, Ordering::Release);
+            CLAIM_PROGRESS_ETA_DAA.store(0, Ordering::Release);
+            return;
+        }
+
+        let mut groups: HashMap<u64, Vec<u64>> = HashMap::new();
+        for e in &self.state.entries {
+            let proven_dead = e.orphan_slashed || e.orphan_retries > 0;
+            if e.claimed || e.slashed || proven_dead || e.batch_cap != 0 {
+                continue;
+            }
+            if self.in_flight_outpoints.contains(&format!("{}:{}", e.coinbase_txid, e.output_index)) {
+                continue;
+            }
+
+            let maturity_daa = e.confirm_daa.saturating_add(e.csv_window).saturating_add(10);
+            let ready_daa = e.orphan_retry_after_daa.map_or(maturity_daa, |retry_daa| maturity_daa.max(retry_daa));
+            groups.entry(e.csv_window).or_default().push(ready_daa);
+        }
+
+        let mut fallback_valid = 0usize;
+        let mut best: Option<(u64, usize)> = None;
+        for ready_scores in groups.values_mut() {
+            ready_scores.sort_unstable();
+            let valid_now =
+                ready_scores.iter().filter(|&&ready_daa| daa_score >= ready_daa).count().min(MAX_CLAIM_BATCH);
+            fallback_valid = fallback_valid.max(valid_now);
+
+            if ready_scores.len() < MIN_CLAIM_BATCH {
+                continue;
+            }
+            let full_batch_daa = ready_scores[MIN_CLAIM_BATCH - 1];
+            let eta_daa = full_batch_daa.saturating_sub(daa_score);
+            match best {
+                None => best = Some((eta_daa, valid_now)),
+                Some((best_eta, best_valid))
+                    if eta_daa < best_eta || (eta_daa == best_eta && valid_now > best_valid) =>
+                {
+                    best = Some((eta_daa, valid_now));
+                }
+                _ => {}
+            }
+        }
+
+        let (valid, eta) =
+            best.map(|(eta, valid)| (valid, eta)).unwrap_or((fallback_valid, CLAIM_PROGRESS_UNAVAILABLE));
+        CLAIM_PROGRESS_VALID.store(valid as u64, Ordering::Release);
+        CLAIM_PROGRESS_ETA_DAA.store(eta, Ordering::Release);
     }
 
     /// Release in-flight claims whose response never arrived (connection hiccup, node
@@ -968,6 +1084,7 @@ impl EscrowWatcher {
                 }
             }
         }
+        self.update_claim_progress(self.last_daa_score);
         self.mark_dirty();
         self.maybe_flush();
         outcome
