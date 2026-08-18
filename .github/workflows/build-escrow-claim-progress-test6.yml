@@ -1,0 +1,158 @@
+name: Build escrow claim progress test.6 Windows prerelease
+
+on:
+  push:
+    branches:
+      - test/escrow-claim-progress-v0.4.9-test.6
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.event.head_commit.message != 'chore: apply escrow claim progress test.6 source'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      KERYX_LLAMA_SKIP: "1"
+      POM_SM_LIST: "89"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+    steps:
+      - name: Checkout claim progress branch
+        uses: actions/checkout@v4
+        with:
+          ref: test/escrow-claim-progress-v0.4.9-test.6
+          fetch-depth: 0
+
+      - name: Apply deterministic claim progress source patch
+        shell: pwsh
+        run: |
+          python scripts/patch-escrow-claim-progress-test6.py
+          cargo fmt --all
+          Select-String -Path Cargo.toml -Pattern 'version = "0.4.9-escrow-claim-progress-test.6"' | Out-Null
+          Select-String -Path src/escrow.rs -Pattern 'ClaimProgressSnapshot' | Out-Null
+          Select-String -Path src/escrow.rs -Pattern 'update_claim_progress' | Out-Null
+          Select-String -Path src/ui.rs -Pattern '"Next Claim"' | Out-Null
+          Select-String -Path src/ui.rs -Pattern 'claim_progress.valid_outputs' | Out-Null
+          git diff --check
+
+      - name: Commit claim progress source before build
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml src/escrow.rs src/ui.rs
+          git commit -m "chore: apply escrow claim progress test.6 source"
+          git push origin HEAD:test/escrow-claim-progress-v0.4.9-test.6
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          choco install protoc -y --no-progress
+          protoc --version
+
+      - name: Install minimal CUDA 12.9
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          use-github-cache: false
+          use-local-cache: false
+
+      - name: Setup MSVC 2022
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          vsversion: "2022"
+
+      - name: Limit package PTX to RTX 5080 sm89
+        shell: pwsh
+        run: |
+          $p = 'src/pom_gpu.rs'
+          $lines = Get-Content $p
+          $lines = $lines | Where-Object {
+            $_ -notmatch '^const PTX_SM(90|86|80|75|70|61):' -and
+            $_ -notmatch 'pom_mine_mod_sm(90|86|80|75|70|61)'
+          }
+          $lines = $lines -replace 'POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\]', 'POM_PTX_CANDIDATES: [(&str, &str, &str); 1]'
+          Set-Content $p $lines -Encoding utf8
+          Select-String -Path $p -Pattern 'POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 1\]' | Out-Null
+          Select-String -Path $p -Pattern 'pom_mine_mod_sm89' | Out-Null
+
+      - name: Build matched miner and CUDA plugin
+        shell: pwsh
+        run: |
+          nvcc --version
+          cargo build -p keryx-miner -p keryxcuda --release
+
+      - name: Verify runtime files
+        shell: pwsh
+        run: |
+          $required = @('target/release/keryx-miner.exe','target/release/keryxcuda.dll')
+          foreach ($f in $required) {
+            if (-not (Test-Path $f)) { throw "Missing required runtime file: $f" }
+            Write-Host "$f -> $((Get-Item $f).Length) bytes"
+          }
+          if (Test-Path 'target/release/keryx-llama.dll') {
+            throw 'Unexpected keryx-llama.dll: test.6 package must reuse the known-good existing llama runtime.'
+          }
+
+      - name: Package claim progress test.6
+        shell: pwsh
+        run: |
+          $dist = 'dist-v0.4.9-escrow-claim-progress-test.6'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item target/release/keryx-miner.exe $dist/
+          Copy-Item target/release/keryxcuda.dll $dist/
+          @(
+            'Keryx Miner v0.4.9-escrow-claim-progress-test.6',
+            '',
+            'Escrow claim-selection fix test.4 + live next-claim estimate in the TUI.',
+            '',
+            'New UI metric:',
+            '- Next Claim: XX/87 · ~time remaining',
+            '- XX counts nominal outputs that are mature and locally eligible for the next CSV-window cohort.',
+            '- ETA is derived from the DAA score of the 87th tracked output and assumes ~10 BPS.',
+            '- Different CSV windows are evaluated independently; a small 36k cohort cannot hide a 792k batch.',
+            '- In-flight, slashed, repair-capped, orphan-quarantined and cooldown entries are excluded.',
+            '',
+            'Examples:',
+            '- Next Claim 62/87 · ~4h 28m',
+            '- Next Claim 87/87 · ready',
+            '- Next Claim 12/87 · waiting  (not enough tracked outputs yet for a deterministic ETA)',
+            '',
+            'Runtime:',
+            '- Windows x64 / CUDA 12.9 / RTX 5080 sm_89 package;',
+            '- reuse the same known-good keryx-llama.dll already working with test.4;',
+            '- keep keryx-miner.exe and keryxcuda.dll from this ZIP together.'
+          ) | Set-Content "$dist/README-TEST6.txt" -Encoding utf8
+
+          $hashLines = foreach ($f in @('keryx-miner.exe','keryxcuda.dll','README-TEST6.txt')) {
+            $h = (Get-FileHash "$dist/$f" -Algorithm SHA256).Hash.ToLower()
+            "$h  $f"
+          }
+          $hashLines | Set-Content "$dist/SHA256SUMS.txt" -Encoding ascii
+          Compress-Archive -Path "$dist/*" -DestinationPath 'keryx-miner-v0.4.9-escrow-claim-progress-test.6-win64.zip' -Force
+          $zipHash = (Get-FileHash 'keryx-miner-v0.4.9-escrow-claim-progress-test.6-win64.zip' -Algorithm SHA256).Hash.ToLower()
+          Set-Content 'ZIP-SHA256.txt' "$zipHash  keryx-miner-v0.4.9-escrow-claim-progress-test.6-win64.zip" -Encoding ascii
+          Write-Host "ZIP SHA256=$zipHash"
+
+      - name: Create GitHub test.6 prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create 'v0.4.9-escrow-claim-progress-test.6' `
+            'keryx-miner-v0.4.9-escrow-claim-progress-test.6-win64.zip' `
+            'dist-v0.4.9-escrow-claim-progress-test.6/keryx-miner.exe' `
+            'dist-v0.4.9-escrow-claim-progress-test.6/keryxcuda.dll' `
+            'dist-v0.4.9-escrow-claim-progress-test.6/SHA256SUMS.txt' `
+            'ZIP-SHA256.txt' `
+            --repo $env:GITHUB_REPOSITORY `
+            --target test/escrow-claim-progress-v0.4.9-test.6 `
+            --title 'Keryx Miner v0.4.9 escrow claim progress test.6' `
+            --notes 'Test.4 claim-selection fix plus a live Next Claim XX/87 and approximate remaining-time metric in the miner TUI. Windows RTX 5080/sm89 build. Reuse the known-good existing keryx-llama.dll.' `
+            --prerelease
