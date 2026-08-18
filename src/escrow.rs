@@ -951,6 +951,19 @@ impl EscrowWatcher {
                     warn!("ESCROW DIAGNOSTIC test.5 COMPLETE: rejection caused NO escrow entry mutation and NO state-file write; all further claims are disabled until restart.");
                     return SubmitResponseOutcome::Handled;
                 }
+                if ESCROW_DIAGNOSTIC_ONE_SHOT {
+                    let mut submitted: Vec<String> =
+                        claim.outpoints.iter().map(|(txid, index)| format!("{}:{}", txid, index)).collect();
+                    submitted.sort();
+                    let mut burned: Vec<String> =
+                        burned_set.iter().map(|(txid, index)| format!("{}:{}", txid, index)).collect();
+                    burned.sort();
+                    warn!("ESCROW DIAGNOSTIC test.5 RAW NODE REJECTION for claim {}: {}", claim_txid, msg);
+                    warn!("ESCROW DIAGNOSTIC test.5 submitted {} outpoint(s): {:?}", submitted.len(), submitted);
+                    warn!("ESCROW DIAGNOSTIC test.5 parsed {} burned outpoint(s): {:?}", burned.len(), burned);
+                    warn!("ESCROW DIAGNOSTIC test.5 COMPLETE: rejection caused NO escrow entry mutation and NO state-file write; all further claims are disabled until restart.");
+                    return SubmitResponseOutcome::Handled;
+                }
                 let batch_rejected = n_outputs > 1;
                 let last_daa = self.last_daa_score;
                 // Bisection step: one dead input orphans the whole batch, but most members
