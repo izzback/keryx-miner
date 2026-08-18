@@ -136,6 +136,9 @@ const MIN_CLAIM_BATCH: usize = MAX_CLAIM_BATCH;
 const CAP_EXPIRY_DAA: u64 = 36_000;
 /// Max claim TXs awaiting a SubmitTransactionResponse at once.
 const MAX_IN_FLIGHT_CLAIMS: usize = 4;
+/// Diagnostic prerelease safety switch: submit at most one escrow claim per process,
+/// print the node's full rejection, and never persist watcher state to disk.
+const ESCROW_DIAGNOSTIC_ONE_SHOT: bool = true;
 
 /// Result of matching a SubmitTransactionResponse against the in-flight claim TXs.
 pub enum SubmitResponseOutcome {
@@ -213,6 +216,8 @@ pub struct EscrowWatcher {
     validation_pending: HashSet<String>,
     /// Entries purged by boot-time validation, for the completion log line.
     validation_purged: u64,
+    /// test.5 diagnostic guard: once a claim has been submitted, never build another.
+    diagnostic_claim_attempted: bool,
 }
 
 /// A claim TX submitted to the node, awaiting its SubmitTransactionResponse.
@@ -270,6 +275,7 @@ impl EscrowWatcher {
             blocks_since_status: 0,
             validation_pending: HashSet::new(),
             validation_purged: 0,
+            diagnostic_claim_attempted: false,
         };
         watcher.rebuild_indexes();
         Ok(watcher)
@@ -300,7 +306,12 @@ impl EscrowWatcher {
 
     #[inline]
     fn mark_dirty(&mut self) {
-        self.dirty = true;
+        // test.5 is intentionally read-only on disk: validation may quarantine ghosts
+        // in memory so the one diagnostic claim is well-formed, but no watcher mutation
+        // (slash/claim/retry/new tracking) is persisted to escrow_state.json.
+        if !ESCROW_DIAGNOSTIC_ONE_SHOT {
+            self.dirty = true;
+        }
     }
 
     /// Persist state at most once per `STATE_SAVE_INTERVAL` to keep disk I/O off the
@@ -603,6 +614,9 @@ impl EscrowWatcher {
 
     /// Scan for matured, eligible escrow entries and build a batched claim TX (if any).
     fn find_claim(&mut self, daa_score: u64) -> Option<RpcTransaction> {
+        if ESCROW_DIAGNOSTIC_ONE_SHOT && self.diagnostic_claim_attempted {
+            return None;
+        }
         if self.in_flight.len() >= MAX_IN_FLIGHT_CLAIMS {
             return None;
         }
@@ -796,6 +810,16 @@ impl EscrowWatcher {
                 );
                 let outpoints: Vec<(String, u32)> =
                     entries.iter().map(|e| (e.coinbase_txid.clone(), e.output_index)).collect();
+                if ESCROW_DIAGNOSTIC_ONE_SHOT {
+                    self.diagnostic_claim_attempted = true;
+                    warn!(
+                        "ESCROW DIAGNOSTIC test.5: submitting ONE claim only: txid={}, outputs={}, csv_window={}, total={:.8} KRX. Further claims are disabled until restart; escrow_state.json is read-only.",
+                        claim_txid,
+                        entries.len(),
+                        entries.first().map(|e| e.csv_window).unwrap_or(0),
+                        total as f64 / 1e8
+                    );
+                }
                 for (t, i) in &outpoints {
                     self.in_flight_outpoints.insert(format!("{}:{}", t, i));
                 }
@@ -838,6 +862,9 @@ impl EscrowWatcher {
         match error {
             None => {
                 info!("EscrowWatcher: claim accepted ({} output(s), txid={})", n_outputs, claim_txid);
+                if ESCROW_DIAGNOSTIC_ONE_SHOT {
+                    warn!("ESCROW DIAGNOSTIC test.5: one-shot claim was ACCEPTED. In-memory state is updated for this process, but escrow_state.json remains unchanged on disk. Discard this diagnostic state copy after the test.");
+                }
                 let amount_sompi = self.mark_entries_claimed(&claim.outpoints);
                 outcome = SubmitResponseOutcome::Accepted { outputs: n_outputs as u64, amount_sompi };
             }
@@ -884,6 +911,19 @@ impl EscrowWatcher {
                         claim_txid,
                         burned_outpoints
                     );
+                }
+                if ESCROW_DIAGNOSTIC_ONE_SHOT {
+                    let mut submitted: Vec<String> =
+                        claim.outpoints.iter().map(|(txid, index)| format!("{}:{}", txid, index)).collect();
+                    submitted.sort();
+                    let mut burned: Vec<String> =
+                        burned_set.iter().map(|(txid, index)| format!("{}:{}", txid, index)).collect();
+                    burned.sort();
+                    warn!("ESCROW DIAGNOSTIC test.5 RAW NODE REJECTION for claim {}: {}", claim_txid, msg);
+                    warn!("ESCROW DIAGNOSTIC test.5 submitted {} outpoint(s): {:?}", submitted.len(), submitted);
+                    warn!("ESCROW DIAGNOSTIC test.5 parsed {} burned outpoint(s): {:?}", burned.len(), burned);
+                    warn!("ESCROW DIAGNOSTIC test.5 COMPLETE: rejection caused NO escrow entry mutation and NO state-file write; all further claims are disabled until restart.");
+                    return SubmitResponseOutcome::Handled;
                 }
                 let batch_rejected = n_outputs > 1;
                 let last_daa = self.last_daa_score;
