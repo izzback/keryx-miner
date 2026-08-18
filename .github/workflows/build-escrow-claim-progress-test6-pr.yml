@@ -1,0 +1,106 @@
+name: Build escrow claim progress test.6 PR
+
+on:
+  pull_request:
+    branches:
+      - test/escrow-claim-fix-v0.4.9
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    if: github.event.pull_request.head.ref == 'test/escrow-claim-progress-v0.4.9-test.6' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      KERYX_LLAMA_SKIP: "1"
+      POM_SM_LIST: "89"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+    steps:
+      - name: Checkout test.6 head
+        uses: actions/checkout@v4
+        with:
+          ref: test/escrow-claim-progress-v0.4.9-test.6
+          fetch-depth: 1
+
+      - name: Verify claim progress source
+        shell: pwsh
+        run: |
+          Select-String -Path Cargo.toml -Pattern 'version = "0.4.9-escrow-claim-progress-test.6"' | Out-Null
+          Select-String -Path src/escrow.rs -Pattern 'ClaimProgressSnapshot' | Out-Null
+          Select-String -Path src/escrow.rs -Pattern 'update_claim_progress' | Out-Null
+          Select-String -Path src/ui.rs -Pattern '"Next Claim"' | Out-Null
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          choco install protoc -y --no-progress
+          protoc --version
+
+      - name: Install minimal CUDA 12.9
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          use-github-cache: false
+          use-local-cache: false
+
+      - name: Setup MSVC 2022
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          vsversion: "2022"
+
+      - name: Limit package PTX to RTX 5080 sm89
+        shell: pwsh
+        run: |
+          $p = 'src/pom_gpu.rs'
+          $lines = Get-Content $p
+          $lines = $lines | Where-Object {
+            $_ -notmatch '^const PTX_SM(90|86|80|75|70|61):' -and
+            $_ -notmatch 'pom_mine_mod_sm(90|86|80|75|70|61)'
+          }
+          $lines = $lines -replace 'POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 7\]', 'POM_PTX_CANDIDATES: [(&str, &str, &str); 1]'
+          Set-Content $p $lines -Encoding utf8
+          Select-String -Path $p -Pattern 'POM_PTX_CANDIDATES: \[\(&str, &str, &str\); 1\]' | Out-Null
+          Select-String -Path $p -Pattern 'pom_mine_mod_sm89' | Out-Null
+
+      - name: Build matched miner and CUDA plugin
+        shell: pwsh
+        run: |
+          nvcc --version
+          cargo build -p keryx-miner -p keryxcuda --release
+
+      - name: Package test.6 runtime
+        shell: pwsh
+        run: |
+          $dist = 'dist-test6'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item target/release/keryx-miner.exe $dist/
+          Copy-Item target/release/keryxcuda.dll $dist/
+          @(
+            'Keryx Miner v0.4.9-escrow-claim-progress-test.6',
+            'Claim-selection fix + live Next Claim XX/87 and approximate DAA-derived ETA.',
+            'Windows x64 / CUDA 12.9 / RTX 5080 sm89.',
+            'Reuse the known-good keryx-llama.dll from the existing test.4 runtime.'
+          ) | Set-Content "$dist/README-TEST6.txt" -Encoding utf8
+          $hashLines = foreach ($f in @('keryx-miner.exe','keryxcuda.dll','README-TEST6.txt')) {
+            $h = (Get-FileHash "$dist/$f" -Algorithm SHA256).Hash.ToLower()
+            "$h  $f"
+          }
+          $hashLines | Set-Content "$dist/SHA256SUMS.txt" -Encoding ascii
+
+      - name: Upload test.6 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: keryx-miner-v0.4.9-escrow-claim-progress-test.6-win64
+          path: dist-test6
+          if-no-files-found: error
+          retention-days: 7
