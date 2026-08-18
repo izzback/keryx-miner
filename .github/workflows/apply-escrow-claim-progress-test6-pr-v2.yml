@@ -1,0 +1,39 @@
+name: Apply escrow claim progress test.6 source on PR v2
+
+on:
+  pull_request:
+    branches:
+      - test/escrow-claim-fix-v0.4.9
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-source:
+    if: github.event.pull_request.head.ref == 'test/escrow-claim-progress-v0.4.9-test.6' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout head branch
+        uses: actions/checkout@v4
+        with:
+          ref: test/escrow-claim-progress-v0.4.9-test.6
+          fetch-depth: 0
+
+      - name: Apply deterministic test.6 source patch
+        run: |
+          python scripts/patch-escrow-claim-progress-test6.py
+          cargo fmt --all
+          grep -F 'version = "0.4.9-escrow-claim-progress-test.6"' Cargo.toml
+          grep -F 'ClaimProgressSnapshot' src/escrow.rs
+          grep -F 'update_claim_progress' src/escrow.rs
+          grep -F '"Next Claim"' src/ui.rs
+          git diff --check
+
+      - name: Commit generated source to the test branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml src/escrow.rs src/ui.rs
+          git commit -m "chore: apply escrow claim progress test.6 source"
+          git push origin HEAD:test/escrow-claim-progress-v0.4.9-test.6
