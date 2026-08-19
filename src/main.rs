@@ -1141,10 +1141,14 @@ async fn run() -> Result<(), Error> {
 
     // Verify GPU inference works before mining. OPoI challenges are mandatory, so a miner
     // that cannot run inference must fail fast with a clear message rather than spam panics.
-    info!("Probing GPU inference (cuBLAS + llama engine) before mining…");
+    info!("Probing GPU inference (cuBLAS + llama engine + timed AI response) before mining…");
     match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
         Ok(keryx_miner::slm::GpuProbe::Ok) => {
-            info!("GPU inference verified — cuBLAS and the llama engine loaded successfully.")
+            if opt.skip_ai_self_test {
+                info!("GPU inference prerequisites verified — timed AI startup self-test explicitly skipped.");
+            } else {
+                info!("GPU inference verified — timed AI startup self-test passed.");
+            }
         }
         Ok(keryx_miner::slm::GpuProbe::NoCuda) => {
             error!("No CUDA device detected — OPoI inference is GPU-only and is mandatory, cannot mine.");
@@ -1155,6 +1159,14 @@ async fn run() -> Result<(), Error> {
             error!("OPoI inference is mandatory: mining without it would answer no request at all.");
             error!("Restore the library shipped with this release next to the miner binary, then restart.");
             return Err("llama inference engine unavailable — cannot start OPoI mining".into());
+        }
+        Ok(keryx_miner::slm::GpuProbe::SelfTestFailed(why)) => {
+            let guidance = format!(
+                "AI startup self-test failed:\n{}\n\nThe miner was stopped before hashing because it would not reliably answer OPoI challenges.\nFix the GPU/CUDA/model configuration and restart. To bypass only this guard deliberately, add --skip-ai-self-test.",
+                why
+            );
+            error!("{}", guidance);
+            return Err(guidance.into());
         }
         Ok(keryx_miner::slm::GpuProbe::CublasMissing) => {
             warn!("CUDA GPU detected but a CUDA runtime lib is missing — installing them automatically (one-time)…");
@@ -1171,7 +1183,11 @@ async fn run() -> Result<(), Error> {
                 // supervisor (HiveOS/PM2) relaunch us with a fresh loader cache.
                 match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
                     Ok(keryx_miner::slm::GpuProbe::Ok) => {
-                        info!("CUDA libs installed — GPU inference verified, starting mining.");
+                        if opt.skip_ai_self_test {
+                            info!("CUDA libs installed — inference prerequisites verified; timed AI self-test skipped.");
+                        } else {
+                            info!("CUDA libs installed — GPU inference and timed AI startup self-test verified.");
+                        }
                     }
                     // Restarting cannot conjure a library that is not on disk; fail here rather
                     // than hand the supervisor a restart loop.
@@ -1179,6 +1195,14 @@ async fn run() -> Result<(), Error> {
                         error!("CUDA libs installed, but the inference engine is unavailable: {}", why);
                         error!("Restore the library shipped with this release next to the miner binary, then restart.");
                         return Err("llama inference engine unavailable — cannot start OPoI mining".into());
+                    }
+                    Ok(keryx_miner::slm::GpuProbe::SelfTestFailed(why)) => {
+                        let guidance = format!(
+                            "AI startup self-test failed after CUDA runtime installation:\n{}\n\nThe miner was stopped before hashing. Fix the GPU/CUDA/model configuration and restart. To bypass only this guard deliberately, add --skip-ai-self-test.",
+                            why
+                        );
+                        error!("{}", guidance);
+                        return Err(guidance.into());
                     }
                     _ => {
                         info!("CUDA libs installed successfully — restarting miner to activate them.");
