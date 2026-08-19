@@ -51,6 +51,13 @@ pub struct Opt {
     pub force_model: Option<String>,
 
     #[clap(
+        long = "skip-ai-self-test",
+        help = "Skip the mandatory startup AI response self-test (unsafe: inference problems may only appear during an OPoI challenge)",
+        help_heading = "OPoI / Inference"
+    )]
+    pub skip_ai_self_test: bool,
+
+    #[clap(
         long = "ipfs-url",
         help = "IPFS Kubo API URL for uploading inference results",
         help_heading = "OPoI / Inference",
@@ -218,6 +225,7 @@ impl Opt {
         // Switch every DAA activation gate (PoM + PoW salts) to its testnet value before any
         // mining state is built — see `pom::set_testnet`.
         keryx_miner::pom::set_testnet(self.testnet);
+        keryx_miner::slm::set_skip_ai_self_test(self.skip_ai_self_test);
         if self.recover_escrow {
             return Ok(());
         }
@@ -278,5 +286,14 @@ mod tests {
     fn model_tier_conflicts_reference_valid_arguments() {
         Opt::command().debug_assert();
         assert!(Opt::try_parse_from(["keryx-miner", "--very-light", "--very-high"]).is_err());
+    }
+
+    #[test]
+    fn ai_self_test_is_enabled_by_default_and_can_be_skipped_explicitly() {
+        let default = Opt::try_parse_from(["keryx-miner"]).unwrap();
+        assert!(!default.skip_ai_self_test);
+
+        let skipped = Opt::try_parse_from(["keryx-miner", "--skip-ai-self-test"]).unwrap();
+        assert!(skipped.skip_ai_self_test);
     }
 }

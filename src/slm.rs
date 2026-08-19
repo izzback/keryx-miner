@@ -9,11 +9,19 @@ use anyhow::{anyhow, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::models::ModelSpec;
 
 const IPFS_GATEWAY: &str = "https://keryx-labs.com";
+const AI_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+const AI_SELF_TEST_WATCHDOG: Duration = Duration::from_secs(90);
+const AI_SELF_TEST_MAX_TOKENS: usize = 64;
+const AI_SELF_TEST_WARMUP_TOKENS: usize = 8;
+const AI_SELF_TEST_PROMPT: &str = "Keryx startup inference self-test: briefly describe what you are.";
+const AI_SELF_TEST_WARMUP_PROMPT: &str = "Keryx startup inference warm-up: reply briefly.";
 /// Shared system prompt for the whole lineup (vendor-agnostic wording).
 const SYSTEM_PROMPT_NEXT: &str =
     "You are a Keryx Network AI — a high-capability decentralized assistant running on GPU miners via the Keryx BlockDAG protocol. \
@@ -26,6 +34,8 @@ const SYSTEM_PROMPT_NEXT: &str =
 
 /// Models the miner currently serves (drives `ai:cap`), set once at startup.
 static SUPPORTED_SPECS: RwLock<&'static [&'static ModelSpec]> = RwLock::new(&[]);
+/// Explicit operator escape hatch. The basic CUDA/cuBLAS/engine probe still runs when this is set.
+static SKIP_AI_SELF_TEST: AtomicBool = AtomicBool::new(false);
 
 // ── File management ──────────────────────────────────────────────────────────
 
@@ -185,7 +195,10 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
                         }
                     }
                 }
-                Err(e) => { stream_err = Some(e.to_string()); break; }
+                Err(e) => {
+                    stream_err = Some(e.to_string());
+                    break;
+                }
             }
         }
         let _ = file.flush();
@@ -206,8 +219,12 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
 
         attempt += 1;
         if attempt >= MAX_ATTEMPTS {
-            return Err(anyhow!("download {} interrupted after {} attempts (got {} MB)",
-                url, attempt, downloaded / 1_000_000));
+            return Err(anyhow!(
+                "download {} interrupted after {} attempts (got {} MB)",
+                url,
+                attempt,
+                downloaded / 1_000_000
+            ));
         }
         let why = stream_err.unwrap_or_else(|| "short read".into());
         ui_download_warn(&format!(
@@ -372,9 +389,15 @@ pub fn init_supported(specs: &'static [&'static ModelSpec]) {
     *SUPPORTED_SPECS.write().unwrap() = specs;
 }
 
+/// Enable/disable only the real-response startup self-test. The prerequisite CUDA/cuBLAS/engine
+/// probe is deliberately not bypassable because mining without those components cannot serve OPoI.
+pub fn set_skip_ai_self_test(skip: bool) {
+    SKIP_AI_SELF_TEST.store(skip, Ordering::Release);
+}
+
 /// Outcome of the startup GPU inference probe.
 pub enum GpuProbe {
-    /// CUDA + cuBLAS present — GPU inference is available.
+    /// CUDA + cuBLAS present and the real AI response self-test passed (or was explicitly skipped).
     Ok,
     /// No CUDA device present — cannot mine (inference is GPU-only).
     NoCuda,
@@ -383,15 +406,155 @@ pub enum GpuProbe {
     /// CUDA is fine but the llama engine library is missing or unusable — carries the reason.
     /// Not auto-recoverable: the library ships with the release.
     EngineMissing(String),
+    /// The engine loaded, but a real challenge-shaped inference failed or exceeded the hard limit.
+    SelfTestFailed(String),
+}
+
+fn run_ai_startup_self_test() -> std::result::Result<(), String> {
+    let specs = *SUPPORTED_SPECS.read().unwrap();
+    if specs.is_empty() {
+        return Err("no inference model is registered in the served lineup".to_string());
+    }
+
+    log::info!(
+        "AI startup self-test: {} model(s), hot 64-token response limit {}s (GPU load + warm-up excluded).",
+        specs.len(),
+        AI_SELF_TEST_TIMEOUT.as_secs()
+    );
+
+    for spec in specs.iter().copied() {
+        let model_id = spec.model_id;
+        let model_name = spec.name;
+        let device_id = crate::pom_gpu::device_for_model(&model_id).unwrap_or(0);
+        let gguf = gguf_path_for(spec).to_string_lossy().into_owned();
+
+        // Cold phase: make llama.cpp own the full resident model on the target GPU before any
+        // performance timing begins. This may legitimately take tens of seconds on a large GGUF
+        // and is intentionally NOT counted against the 60-second OPoI response threshold.
+        log::info!(
+            "AI startup self-test: cold-loading '{}' on GPU {} (not timed)…",
+            model_name,
+            device_id
+        );
+        if !crate::llama_engine::active_for(&gguf, device_id as usize) {
+            if let Err(e) = crate::pom_gpu::load_llama_for_inference(&gguf, device_id) {
+                mark_model_unavailable(&model_id, if e.is_oom() { "startup_load_oom" } else { "startup_load_failed" });
+                return Err(format!(
+                    "model '{}' could not be fully loaded for GPU inference on GPU {}: {}. \
+                     The hot benchmark was not started because the cold preparation phase failed.",
+                    model_name, device_id, e
+                ));
+            }
+        }
+        if !crate::llama_engine::active_for(&gguf, device_id as usize) {
+            mark_model_unavailable(&model_id, "startup_load_not_resident");
+            return Err(format!(
+                "model '{}' load returned without leaving the llama engine resident on GPU {}. \
+                 The hot benchmark was not started.",
+                model_name, device_id
+            ));
+        }
+
+        // Untimed warm-up: exercise tokenization/context setup and the first CUDA generation so
+        // one-time initialization/JIT costs cannot contaminate the number we compare to 60s.
+        log::info!(
+            "AI startup self-test: '{}' resident on GPU {} — running untimed {}-token warm-up…",
+            model_name,
+            device_id,
+            AI_SELF_TEST_WARMUP_TOKENS
+        );
+        match load_and_run_inference(&model_id, AI_SELF_TEST_WARMUP_PROMPT, AI_SELF_TEST_WARMUP_TOKENS) {
+            Some(response) if !response.trim().is_empty() => {}
+            _ => {
+                mark_model_unavailable(&model_id, "startup_warmup_failed");
+                return Err(format!(
+                    "model '{}' failed its untimed warm-up after being loaded on GPU {}. \
+                     The hot benchmark was not started because the inference path is not healthy.",
+                    model_name, device_id
+                ));
+            }
+        }
+
+        log::info!(
+            "AI startup self-test: HOT benchmark '{}' on GPU {} — {} tokens, load/warm-up excluded…",
+            model_name,
+            device_id,
+            AI_SELF_TEST_MAX_TOKENS
+        );
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name(format!("keryx-ai-hot-self-test-gpu{}", device_id))
+            .spawn(move || {
+                // Start the stopwatch inside the worker: thread creation/scheduling is not AI
+                // latency and must not pollute the hot inference measurement.
+                let started = Instant::now();
+                let response = load_and_run_inference(&model_id, AI_SELF_TEST_PROMPT, AI_SELF_TEST_MAX_TOKENS);
+                let elapsed = started.elapsed();
+                let _ = tx.send((response, elapsed));
+            })
+            .map_err(|e| format!("could not launch hot AI self-test for '{}': {}", model_name, e))?;
+
+        match rx.recv_timeout(AI_SELF_TEST_WATCHDOG) {
+            Ok((Some(response), elapsed)) if !response.trim().is_empty() => {
+                if elapsed > AI_SELF_TEST_TIMEOUT {
+                    mark_model_unavailable(&model_id, "startup_hot_response_too_slow");
+                    return Err(format!(
+                        "model '{}' hot 64-token response took {:.2}s, above the {}s limit. \
+                         Cold model loading and the warm-up were excluded from this measurement. \
+                         Mining is stopped because this miner would be too slow for OPoI challenges.",
+                        model_name,
+                        elapsed.as_secs_f64(),
+                        AI_SELF_TEST_TIMEOUT.as_secs()
+                    ));
+                }
+                log::info!(
+                    "AI startup self-test PASS (HOT): '{}' answered in {:.2}s ({} chars); cold load + warm-up excluded.",
+                    model_name,
+                    elapsed.as_secs_f64(),
+                    response.chars().count()
+                );
+            }
+            Ok((_, elapsed)) => {
+                mark_model_unavailable(&model_id, "startup_hot_response_failed");
+                return Err(format!(
+                    "model '{}' returned no usable hot AI response after {:.2}s. Cold model loading and warm-up had already completed, \
+                     so the failure is in the live inference path. Mining is stopped because this miner would miss OPoI challenges.",
+                    model_name,
+                    elapsed.as_secs_f64()
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                mark_model_unavailable(&model_id, "startup_hot_response_watchdog");
+                return Err(format!(
+                    "model '{}' hot inference did not return within the {}s safety watchdog after cold load and warm-up completed. \
+                     The performance limit remains {}s; the longer watchdog only prevents a wedged inference call from hanging startup forever.",
+                    model_name,
+                    AI_SELF_TEST_WATCHDOG.as_secs(),
+                    AI_SELF_TEST_TIMEOUT.as_secs()
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                mark_model_unavailable(&model_id, "startup_hot_worker_terminated");
+                return Err(format!(
+                    "hot AI self-test worker for '{}' terminated before returning a response. The model had already been loaded and warmed; \
+                     check CUDA/llama runtime logs. Use --skip-ai-self-test only to bypass this guard deliberately.",
+                    model_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Verify that GPU inference can actually work *before* mining starts.
 ///
 /// The in-process llama engine and its cuBLAS dependency are both dlopened lazily on the first
 /// load; discovering either of them missing mid-challenge would silently drop responses while
-/// mining kept running — the possession walk has no dependency on them. Probe all three
-/// prerequisites up front: a usable CUDA device (driver), a loadable cuBLAS, and the engine
-/// library itself, and report a clean, actionable result.
+/// mining kept running — the possession walk has no dependency on them. Probe the prerequisites,
+/// cold-load each advertised model onto its GPU, warm it once without timing, then measure one
+/// real 64-token response through the normal OPoI path. Only that hot response is compared to the
+/// 60-second limit; model loading and one-time warm-up/JIT work are deliberately excluded.
 pub fn probe_gpu_inference() -> GpuProbe {
     if crate::pom_gpu::query_all_gpus_vram().is_empty() {
         return GpuProbe::NoCuda;
@@ -415,7 +578,19 @@ pub fn probe_gpu_inference() -> GpuProbe {
     if let Err(why) = crate::llama_engine::probe_library() {
         return GpuProbe::EngineMissing(why);
     }
-    GpuProbe::Ok
+
+    if SKIP_AI_SELF_TEST.load(Ordering::Acquire) {
+        log::warn!(
+            "AI startup self-test SKIPPED by --skip-ai-self-test. CUDA/cuBLAS/llama loaded, but no real AI response was timed; \
+             inference failures or slow responses may only appear during a live OPoI challenge."
+        );
+        return GpuProbe::Ok;
+    }
+
+    match run_ai_startup_self_test() {
+        Ok(()) => GpuProbe::Ok,
+        Err(why) => GpuProbe::SelfTestFailed(why),
+    }
 }
 
 /// Pre-download all registered model files before mining starts.
