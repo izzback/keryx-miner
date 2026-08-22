@@ -338,6 +338,10 @@ impl MinerManager {
                 let mut pom_nonce: u64 = thread_rng().next_u64();
                 const POM_BATCH: u64 = 1 << 20;
                 const POM_V3_BATCH: u64 = 512;
+                // PoM v4 has a very different launch shape from v3. The tensor-core solver
+                // amortizes its offset chase/launch overhead with a larger batch while staying
+                // responsive at 10 BPS. Override for benchmarking/older GPUs.
+                const POM_V4_BATCH: u64 = 1 << 16;
 
                 loop {
                     nonces[0] = 0;
@@ -406,8 +410,18 @@ impl MinerManager {
                         let v3 = daa >= keryx_miner::pom::pom_v3_activation_daa();
                         let v4 = daa >= keryx_miner::pom::pom_v4_activation_daa();
                         // v3 walks are ~3-4 orders of magnitude heavier per nonce than the hash
-                        // walk: small batches keep template latency low at 10 BPS.
-                        let batch = if v3 { POM_V3_BATCH } else { POM_BATCH };
+                        // walk. v4 gets its own batch: it must not inherit the v3=512 cap.
+                        let batch = if v4 {
+                            std::env::var("KERYX_POM_V4_BATCH")
+                                .ok()
+                                .and_then(|s| s.trim().parse::<u64>().ok())
+                                .filter(|&b| b > 0)
+                                .unwrap_or(POM_V4_BATCH)
+                        } else if v3 {
+                            POM_V3_BATCH
+                        } else {
+                            POM_BATCH
+                        };
                         let found = keryx_miner::pom_gpu::mine(worker_device_id, &pph, time, &target_le, pom_nonce, batch, h3, walk_v2, h5_1, h5_2, v3, v4);
                         pom_nonce = pom_nonce.wrapping_add(batch);
                         hashes_tried.fetch_add(batch, Ordering::AcqRel);
