@@ -1,0 +1,56 @@
+name: Build PoM v4 nextgen fatbin
+
+on:
+  push:
+    branches:
+      - perf/pom-v4-tensor-core-supr-0.11.6
+
+permissions:
+  contents: write
+
+jobs:
+  fatbin:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf/pom-v4-tensor-core-supr-0.11.6
+          fetch-depth: 0
+
+      - name: Build native nextgen fatbin
+        shell: bash
+        run: |
+          nvcc --version
+          nvcc -fatbin -O3 cuda/pom_mine.cu -o cuda/pom_mine_nextgen.fatbin \
+            -gencode arch=compute_80,code=sm_80 \
+            -gencode arch=compute_86,code=sm_86 \
+            -gencode arch=compute_89,code=sm_89 \
+            -gencode arch=compute_90,code=sm_90 \
+            -gencode arch=compute_120,code=sm_120 \
+            -gencode arch=compute_80,code=compute_80
+          test -s cuda/pom_mine_nextgen.fatbin
+          cuobjdump -symbols cuda/pom_mine_nextgen.fatbin | grep -q pom_mine_v4
+          cuobjdump -symbols cuda/pom_mine_nextgen.fatbin | grep -q pom_mine_v4_chase
+          cuobjdump -symbols cuda/pom_mine_nextgen.fatbin | grep -q pom_mine_v4_tc
+
+      - name: Commit regenerated fatbin
+        shell: bash
+        run: |
+          if git diff --quiet -- cuda/pom_mine_nextgen.fatbin; then
+            echo "Fatbin already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cuda/pom_mine_nextgen.fatbin
+          git commit -m "build(pom-v4): regenerate nextgen fatbin with tensor cores"
+          git push origin HEAD:perf/pom-v4-tensor-core-supr-0.11.6
