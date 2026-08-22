@@ -12,19 +12,19 @@ jobs:
   fatbin:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates
-
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
           ref: perf/pom-v4-tensor-core-supr-0.11.6
           fetch-depth: 0
+
+      - name: Install CUDA 12.9 nvcc
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc"]'
 
       - name: Build native nextgen fatbin
         shell: bash
