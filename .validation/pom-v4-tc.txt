@@ -1,8 +1,0 @@
-status=FAIL
-tested_sha=b7f30aadf9c931b42e028115dc1cbf31e4ef0cc4
-cuda_setup=success
-prereqs=success
-nvcc_sm80=success
-nvcc_sm120=success
-rustfmt=failure
-cargo_check_lib=success
