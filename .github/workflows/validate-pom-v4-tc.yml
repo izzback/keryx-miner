@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - perf/pom-v4-tensor-core-supr-0.11.6
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -77,7 +80,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          TESTED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PREREQS: ${{ steps.prereqs.outcome }}
           RUST_SETUP: ${{ steps.rust.outcome }}
           NVCC80: ${{ steps.nvcc80.outcome }}
