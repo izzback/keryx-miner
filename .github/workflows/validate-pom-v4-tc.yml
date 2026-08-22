@@ -17,8 +17,6 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     name: CUDA 12.9 kernel + Rust check
     runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
     env:
       KERYX_LLAMA_SKIP: "1"
       DEBIAN_FRONTEND: noninteractive
@@ -29,23 +27,24 @@ jobs:
           ref: perf/pom-v4-tensor-core-supr-0.11.6
           fetch-depth: 0
 
+      - id: cuda
+        name: Install CUDA 12.9 nvcc
+        continue-on-error: true
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc"]'
+
       - id: prereqs
         name: Install build prerequisites
         continue-on-error: true
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config \
-            protobuf-compiler cmake clang libclang-dev libssl-dev \
-            ocl-icd-opencl-dev
-
-      - id: rust
-        name: Install Rust stable
-        continue-on-error: true
-        shell: bash
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component rustfmt
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler build-essential pkg-config cmake clang libclang-dev \
+            libssl-dev ocl-icd-opencl-dev
+          rustup component add rustfmt
 
       - id: nvcc80
         name: Compile PoM v4 kernel for Ampere
@@ -67,37 +66,34 @@ jobs:
       - id: fmt
         name: Rust format check
         continue-on-error: true
-        shell: bash
-        run: $HOME/.cargo/bin/cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - id: rustcheck
         name: Rust host compile check
         continue-on-error: true
-        shell: bash
-        run: $HOME/.cargo/bin/cargo check --lib
+        run: cargo check --lib
 
       - name: Publish validation result
         if: always()
-        shell: bash
         env:
           TESTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CUDA_SETUP: ${{ steps.cuda.outcome }}
           PREREQS: ${{ steps.prereqs.outcome }}
-          RUST_SETUP: ${{ steps.rust.outcome }}
           NVCC80: ${{ steps.nvcc80.outcome }}
           NVCC120: ${{ steps.nvcc120.outcome }}
           FMT: ${{ steps.fmt.outcome }}
           RUSTCHECK: ${{ steps.rustcheck.outcome }}
         run: |
           status=PASS
-          for x in "$PREREQS" "$RUST_SETUP" "$NVCC80" "$NVCC120" "$FMT" "$RUSTCHECK"; do
+          for x in "$CUDA_SETUP" "$PREREQS" "$NVCC80" "$NVCC120" "$FMT" "$RUSTCHECK"; do
             if [ "$x" != "success" ]; then status=FAIL; fi
           done
           mkdir -p .validation
           cat > .validation/pom-v4-tc.txt <<EOF
           status=$status
           tested_sha=$TESTED_SHA
+          cuda_setup=$CUDA_SETUP
           prereqs=$PREREQS
-          rust_setup=$RUST_SETUP
           nvcc_sm80=$NVCC80
           nvcc_sm120=$NVCC120
           rustfmt=$FMT
