@@ -7,10 +7,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   cuda129:
+    if: github.actor != 'github-actions[bot]'
     name: CUDA 12.9 kernel + Rust check
     runs-on: ubuntu-latest
     container:
@@ -19,7 +20,15 @@ jobs:
       KERYX_LLAMA_SKIP: "1"
       DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Install build prerequisites
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf/pom-v4-tensor-core-supr-0.11.6
+          fetch-depth: 0
+
+      - id: prereqs
+        name: Install build prerequisites
+        continue-on-error: true
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
@@ -27,36 +36,75 @@ jobs:
             protobuf-compiler cmake clang libclang-dev libssl-dev \
             ocl-icd-opencl-dev
 
-      - name: Install Rust stable
+      - id: rust
+        name: Install Rust stable
+        continue-on-error: true
         shell: bash
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Checkout branch
-        uses: actions/checkout@v4
-        with:
-          ref: perf/pom-v4-tensor-core-supr-0.11.6
-
-      - name: Show CUDA toolchain
-        run: nvcc --version
-
-      - name: Compile PoM v4 kernel for Ampere
+      - id: nvcc80
+        name: Compile PoM v4 kernel for Ampere
+        continue-on-error: true
         run: |
+          nvcc --version
           nvcc -ptx -O3 -arch=sm_80 cuda/pom_mine.cu -o /tmp/pom_mine_sm80.ptx
           grep -q 'pom_mine_v4_chase' /tmp/pom_mine_sm80.ptx
           grep -q 'pom_mine_v4_tc' /tmp/pom_mine_sm80.ptx
 
-      - name: Compile PoM v4 kernel for Blackwell
+      - id: nvcc120
+        name: Compile PoM v4 kernel for Blackwell
+        continue-on-error: true
         run: |
           nvcc -ptx -O3 -arch=sm_120 cuda/pom_mine.cu -o /tmp/pom_mine_sm120.ptx
           grep -q 'pom_mine_v4_chase' /tmp/pom_mine_sm120.ptx
           grep -q 'pom_mine_v4_tc' /tmp/pom_mine_sm120.ptx
 
-      - name: Rust format check
+      - id: fmt
+        name: Rust format check
+        continue-on-error: true
         shell: bash
         run: $HOME/.cargo/bin/cargo fmt --all -- --check
 
-      - name: Rust host compile check
+      - id: rustcheck
+        name: Rust host compile check
+        continue-on-error: true
         shell: bash
         run: $HOME/.cargo/bin/cargo check --lib
+
+      - name: Publish validation result
+        if: always()
+        shell: bash
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          PREREQS: ${{ steps.prereqs.outcome }}
+          RUST_SETUP: ${{ steps.rust.outcome }}
+          NVCC80: ${{ steps.nvcc80.outcome }}
+          NVCC120: ${{ steps.nvcc120.outcome }}
+          FMT: ${{ steps.fmt.outcome }}
+          RUSTCHECK: ${{ steps.rustcheck.outcome }}
+        run: |
+          status=PASS
+          for x in "$PREREQS" "$RUST_SETUP" "$NVCC80" "$NVCC120" "$FMT" "$RUSTCHECK"; do
+            if [ "$x" != "success" ]; then status=FAIL; fi
+          done
+          mkdir -p .validation
+          cat > .validation/pom-v4-tc.txt <<EOF
+          status=$status
+          tested_sha=$TESTED_SHA
+          prereqs=$PREREQS
+          rust_setup=$RUST_SETUP
+          nvcc_sm80=$NVCC80
+          nvcc_sm120=$NVCC120
+          rustfmt=$FMT
+          cargo_check_lib=$RUSTCHECK
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .validation/pom-v4-tc.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: record PoM v4 tensor-core validation $status"
+            git push origin HEAD:perf/pom-v4-tensor-core-supr-0.11.6
+          fi
+          test "$status" = PASS
