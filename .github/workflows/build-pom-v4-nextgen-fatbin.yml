@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - perf/pom-v4-tensor-core-supr-0.11.6
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
