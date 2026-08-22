@@ -1,0 +1,62 @@
+name: Validate PoM v4 Tensor Core port
+
+on:
+  push:
+    branches:
+      - perf/pom-v4-tensor-core-supr-0.11.6
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cuda129:
+    name: CUDA 12.9 kernel + Rust check
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
+    env:
+      KERYX_LLAMA_SKIP: "1"
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            protobuf-compiler cmake clang libclang-dev libssl-dev \
+            ocl-icd-opencl-dev
+
+      - name: Install Rust stable
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf/pom-v4-tensor-core-supr-0.11.6
+
+      - name: Show CUDA toolchain
+        run: nvcc --version
+
+      - name: Compile PoM v4 kernel for Ampere
+        run: |
+          nvcc -ptx -O3 -arch=sm_80 cuda/pom_mine.cu -o /tmp/pom_mine_sm80.ptx
+          grep -q 'pom_mine_v4_chase' /tmp/pom_mine_sm80.ptx
+          grep -q 'pom_mine_v4_tc' /tmp/pom_mine_sm80.ptx
+
+      - name: Compile PoM v4 kernel for Blackwell
+        run: |
+          nvcc -ptx -O3 -arch=sm_120 cuda/pom_mine.cu -o /tmp/pom_mine_sm120.ptx
+          grep -q 'pom_mine_v4_chase' /tmp/pom_mine_sm120.ptx
+          grep -q 'pom_mine_v4_tc' /tmp/pom_mine_sm120.ptx
+
+      - name: Rust format check
+        shell: bash
+        run: $HOME/.cargo/bin/cargo fmt --all -- --check
+
+      - name: Rust host compile check
+        shell: bash
+        run: $HOME/.cargo/bin/cargo check --lib
