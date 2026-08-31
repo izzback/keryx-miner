@@ -1,28 +1,50 @@
-name: Validate CUDA reconnect patch
+name: Apply CUDA reconnect fix
 
 on:
   push:
     branches:
       - fix/cuda-reconnect-context-poisoning
+    paths:
+      - patches/apply_cuda_reconnect_fix.py
+      - .github/workflows/validate-cuda-reconnect-patch.yml
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  patch-check:
+  apply-and-validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout v0.5.4 patch branch
+      - name: Checkout v0.5.4 fix branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify patch applies cleanly
-        run: git apply --check patches/keryx-v0.5.4-cuda-reconnect-fix.patch
+      - name: Apply deterministic source edits
+        run: python3 patches/apply_cuda_reconnect_fix.py
 
-      - name: Apply patch
-        run: git apply patches/keryx-v0.5.4-cuda-reconnect-fix.patch
+      - name: Format Rust sources
+        run: cargo fmt --all
 
-      - name: Verify Rust formatting
-        run: cargo fmt --all -- --check
+      - name: Validate diff
+        shell: bash
+        run: |
+          git diff --check
+          changed="$(git diff --name-only | sort)"
+          printf '%s\n' "$changed"
+          allowed="$(printf '%s\n' \
+            plugins/cuda/src/worker.rs \
+            src/main.rs \
+            src/miner.rs \
+            src/pom_gpu.rs | sort)"
+          test "$changed" = "$allowed"
 
-      - name: Show resulting diff
-        run: git diff --check && git diff --stat
+      - name: Commit applied fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs src/miner.rs src/pom_gpu.rs plugins/cuda/src/worker.rs
+          git commit -m "fix(cuda): restart process after sticky CUDA faults"
+          git push origin HEAD:fix/cuda-reconnect-context-poisoning
