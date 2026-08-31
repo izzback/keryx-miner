@@ -11,12 +11,14 @@ permissions:
 
 jobs:
   build-windows:
-    runs-on: windows-2022
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
 
     steps:
       - name: Checkout v0.5.4 build branch
         uses: actions/checkout@v4
+        with:
+          clean: true
 
       - name: Configure MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -29,12 +31,24 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
 
-      - name: Install CUDA 12.9.2
-        uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          cuda: '12.9.2'
-          method: 'local'
-          sub-packages: '["nvcc", "cudart", "cudart_dev", "cublas", "cublas_dev", "curand", "curand_dev"]'
+      - name: Select existing CUDA 12.9
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @(
+            $env:CUDA_PATH,
+            'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9'
+          ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'bin\nvcc.exe')) }
+          if (-not $candidates -or $candidates.Count -eq 0) {
+            Write-Host 'CUDA candidates found on disk:'
+            Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            throw 'CUDA 12.9 / nvcc not found on the self-hosted runner.'
+          }
+          $cuda = $candidates | Where-Object { $_ -match 'v12\.9' } | Select-Object -First 1
+          if (-not $cuda) { $cuda = $candidates | Select-Object -First 1 }
+          "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "Selected CUDA_PATH=$cuda"
 
       - name: Show toolchain
         shell: pwsh
@@ -52,12 +66,14 @@ jobs:
           KERYX_LLAMA_ARCHS: '75-real;80-real;86-real;89-real;89-virtual'
           POM_SM_LIST: '90,89,86,80,75,70,61'
         run: |
+          $ErrorActionPreference = 'Stop'
           cargo build --release --locked -p keryx-miner
 
       - name: Package Windows build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\release\keryx-miner.exe dist\
           Copy-Item target\release\keryx-llama.dll dist\
@@ -82,8 +98,8 @@ jobs:
           Source: https://github.com/Keryx-Labs/keryx-miner
           Upstream commit: d1b5cbcc5a80a797473058e6c19baad533a1e7b4
           Build branch: build-v0.5.4
-          CUDA toolkit: 12.9.2
           Target: x86_64-pc-windows-msvc
+          CUDA: $env:CUDA_PATH
           "@ | Set-Content -Encoding UTF8 dist\BUILD-INFO.txt
 
           Get-ChildItem dist | ForEach-Object {
@@ -93,7 +109,8 @@ jobs:
             }
           } | Set-Content -Encoding ASCII dist\SHA256SUMS.txt
 
-          7z a -tzip -mx=5 keryx-miner-v0.5.4-win64-amd64.zip .\dist\*
+          Remove-Item keryx-miner-v0.5.4-win64-amd64.zip -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path .\dist\* -DestinationPath .\keryx-miner-v0.5.4-win64-amd64.zip -CompressionLevel Optimal
           $zipHash = (Get-FileHash .\keryx-miner-v0.5.4-win64-amd64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$zipHash  keryx-miner-v0.5.4-win64-amd64.zip" | Set-Content -Encoding ASCII keryx-miner-v0.5.4-win64-amd64.zip.sha256
 
