@@ -48,6 +48,17 @@ jobs:
           method: network
           sub-packages: '["nvcc"]'
 
+      - name: Install CUDA runtime and cuBLAS development libraries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cuda-cudart-dev-12-2 libcublas-dev-12-2
+          test -f /usr/local/cuda-12.2/include/cuda_runtime.h
+          test -e /usr/local/cuda-12.2/lib64/libcudart.so
+          test -e /usr/local/cuda-12.2/lib64/libcublas.so
+          test -e /usr/local/cuda-12.2/lib64/libcublasLt.so
+
       - name: Verify toolchain
         shell: bash
         run: |
