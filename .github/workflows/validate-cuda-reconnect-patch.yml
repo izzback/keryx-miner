@@ -1,0 +1,28 @@
+name: Validate CUDA reconnect patch
+
+on:
+  push:
+    branches:
+      - fix/cuda-reconnect-context-poisoning
+  workflow_dispatch:
+
+jobs:
+  patch-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v0.5.4 patch branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify patch applies cleanly
+        run: git apply --check patches/keryx-v0.5.4-cuda-reconnect-fix.patch
+
+      - name: Apply patch
+        run: git apply patches/keryx-v0.5.4-cuda-reconnect-fix.patch
+
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Show resulting diff
+        run: git diff --check && git diff --stat
