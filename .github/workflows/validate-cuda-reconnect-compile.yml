@@ -1,0 +1,57 @@
+name: Validate CUDA reconnect compile
+
+on:
+  push:
+    branches:
+      - fix/cuda-reconnect-context-poisoning
+    paths:
+      - src/main.rs
+      - src/miner.rs
+      - src/pom_gpu.rs
+      - plugins/cuda/src/worker.rs
+      - .github/workflows/validate-cuda-reconnect-compile.yml
+  workflow_dispatch:
+
+jobs:
+  cargo-check:
+    runs-on: ubuntu-latest
+    env:
+      KERYX_LLAMA_SKIP: "1"
+      POM_SM_LIST: "86"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Provide deterministic nvcc shim for Rust type-check
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/nvcc" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+            echo 'Cuda compilation tools, release 12.2, V12.2.140'
+            exit 0
+          fi
+          out=""
+          while (($#)); do
+            if [[ "$1" == "-o" ]]; then
+              shift
+              out="$1"
+              break
+            fi
+            shift
+          done
+          test -n "$out"
+          cp plugins/cuda/resources/keryx-cuda-sm86.ptx "$out"
+          EOF
+          chmod +x "$RUNNER_TEMP/nvcc"
+          echo "NVCC=$RUNNER_TEMP/nvcc" >> "$GITHUB_ENV"
+
+      - name: Cargo check miner and CUDA plugin
+        run: cargo check -p keryx-miner -p keryxcuda
