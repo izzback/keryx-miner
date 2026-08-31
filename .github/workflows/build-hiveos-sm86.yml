@@ -1,0 +1,126 @@
+name: Build patched Keryx miner HiveOS RTX3080 sm86
+
+on:
+  push:
+    branches:
+      - fix/cuda-reconnect-context-poisoning
+    paths:
+      - .github/workflows/build-hiveos-sm86.yml
+  workflow_dispatch:
+
+jobs:
+  hiveos-sm86:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      POM_SM_LIST: "86"
+      KERYX_LLAMA_ARCHS: "86-real;86-virtual"
+      NUM_JOBS: "4"
+    steps:
+      - name: Checkout patched branch
+        uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config curl unzip tar git libgomp1
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CUDA 12.2 compiler
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.2.2'
+          method: network
+          sub-packages: '["nvcc"]'
+
+      - name: Install CUDA runtime and cuBLAS development libraries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cuda-cudart-dev-12-2 libcublas-dev-12-2
+          test -f /usr/local/cuda-12.2/include/cuda_runtime.h
+          test -e /usr/local/cuda-12.2/lib64/libcublas.so
+
+      - name: Build complete sm86 release including llama
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export NVCC="$(command -v nvcc)"
+          unset KERYX_LLAMA_SKIP
+          test -z "${KERYX_LLAMA_SKIP:-}"
+          nvcc -V
+          echo "POM_SM_LIST=$POM_SM_LIST"
+          echo "KERYX_LLAMA_ARCHS=$KERYX_LLAMA_ARCHS"
+          cargo build --release -p keryx-miner -p keryxcuda
+
+          test -x target/release/keryx-miner
+          test -f target/release/libkeryxcuda.so
+          test -f target/release/libkeryx-llama.so
+          strip target/release/keryx-miner || true
+          strip target/release/libkeryxcuda.so || true
+          strip target/release/libkeryx-llama.so || true
+
+      - name: Download official v0.5.4 HiveOS layout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 4 --retry-delay 2 \
+            'https://github.com/Keryx-Labs/keryx-miner/releases/download/v0.5.4-PoM/keryx-miner-v0.5.4_PoM_hiveos.tar.gz' \
+            -o official-hiveos.tar.gz
+          mkdir official-hiveos
+          tar -xzf official-hiveos.tar.gz -C official-hiveos
+
+      - name: Package patched sm86 HiveOS miner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$(find official-hiveos -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          MINER="$(find "$ROOT" -maxdepth 2 -type f \( -name 'keryx-miner' -o -name 'keryx-miner-*linux*' \) | head -n1)"
+          CUDA_SO="$(find "$ROOT" -maxdepth 2 -type f -name 'libkeryxcuda.so' | head -n1)"
+          LLAMA_SO="$(find "$ROOT" -maxdepth 2 -type f -name 'libkeryx-llama.so' | head -n1)"
+          test -n "$ROOT" && test -n "$MINER" && test -n "$CUDA_SO" && test -n "$LLAMA_SO"
+
+          install -m 0755 target/release/keryx-miner "$MINER"
+          install -m 0755 target/release/libkeryxcuda.so "$CUDA_SO"
+          install -m 0755 target/release/libkeryx-llama.so "$LLAMA_SO"
+
+          cat > "$ROOT/CUDA-RECONNECT-FIX.txt" <<EOF
+          Keryx miner v0.5.4-PoM — HiveOS RTX 3080 / sm_86 build
+          Branch: fix/cuda-reconnect-context-poisoning
+          Commit: $GITHUB_SHA
+          CUDA compiler: 12.2.2
+          POM: sm_86
+          llama.cpp: b10015, sm_86 real + compute_86 PTX, freshly compiled (NO KERYX_LLAMA_SKIP)
+          Fresh binaries: keryx-miner, libkeryxcuda.so, libkeryx-llama.so
+          Fix: fatal/sticky CUDA faults force a clean process restart after Stratum disconnect.
+          EOF
+
+          mkdir -p dist
+          ARCHIVE='dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos-sm86.tar.gz'
+          tar -C "$(dirname "$ROOT")" -czf "$ARCHIVE" "$(basename "$ROOT")"
+          sha256sum "$ARCHIVE" | tee dist/SHA256.txt
+
+          mkdir verify
+          tar -xzf "$ARCHIVE" -C verify
+          test -n "$(find verify -type f -name 'keryx-miner' -print -quit)"
+          test -n "$(find verify -type f -name 'libkeryxcuda.so' -print -quit)"
+          test -n "$(find verify -type f -name 'libkeryx-llama.so' -print -quit)"
+
+      - name: Upload HiveOS sm86 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos-sm86
+          path: |
+            dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos-sm86.tar.gz
+            dist/SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
