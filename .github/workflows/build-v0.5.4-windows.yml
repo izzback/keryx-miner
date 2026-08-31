@@ -29,10 +29,10 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
 
-      - name: Install CUDA 12.2.2
+      - name: Install CUDA 12.9.2
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: '12.2.2'
+          cuda: '12.9.2'
           method: 'network'
           sub-packages: '["nvcc", "cudart", "cudart_dev", "cublas", "cublas_dev", "curand", "curand_dev"]'
 
@@ -82,7 +82,7 @@ jobs:
           Source: https://github.com/Keryx-Labs/keryx-miner
           Upstream commit: d1b5cbcc5a80a797473058e6c19baad533a1e7b4
           Build branch: build-v0.5.4
-          CUDA toolkit: 12.2.2
+          CUDA toolkit: 12.9.2
           Target: x86_64-pc-windows-msvc
           "@ | Set-Content -Encoding UTF8 dist\BUILD-INFO.txt
 
