@@ -9,6 +9,7 @@ on:
       - src/miner.rs
       - src/pom_gpu.rs
       - plugins/cuda/src/worker.rs
+      - tools/keryx-llama/**
       - integrations/hiveos/**
       - .github/workflows/validate-cuda-reconnect-compile.yml
   workflow_dispatch:
@@ -16,9 +17,11 @@ on:
 jobs:
   hiveos-release:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
-      KERYX_LLAMA_SKIP: "1"
+      POM_SM_LIST: "90,89,86,80,75,70,61"
+      KERYX_LLAMA_ARCHS: "75-real;80-real;86-real;89-real;89-virtual"
+      NUM_JOBS: "8"
     steps:
       - name: Checkout patched branch
         uses: actions/checkout@v4
@@ -29,7 +32,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential cmake pkg-config curl unzip tar
+          sudo apt-get install -y -qq build-essential cmake pkg-config curl unzip tar git libgomp1
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -48,28 +51,46 @@ jobs:
       - name: Verify toolchain
         shell: bash
         run: |
+          set -euxo pipefail
           rustc -V
           cargo -V
           nvcc -V
           protoc --version
+          cmake --version | head -1
+          g++ --version | head -1
           ldd --version | head -1
+          test -z "${KERYX_LLAMA_SKIP:-}"
+          echo "POM_SM_LIST=$POM_SM_LIST"
+          echo "KERYX_LLAMA_ARCHS=$KERYX_LLAMA_ARCHS"
 
-      - name: Build patched Linux release miner and CUDA plugin
+      - name: Build complete patched HiveOS release
         shell: bash
-        env:
-          KERYX_LLAMA_SKIP: "1"
         run: |
           set -euxo pipefail
           export NVCC="$(command -v nvcc)"
+          unset KERYX_LLAMA_SKIP
           cargo build --release -p keryx-miner -p keryxcuda
+
           test -x target/release/keryx-miner
           test -f target/release/libkeryxcuda.so
+          test -f target/release/libkeryx-llama.so
+
           strip target/release/keryx-miner || true
           strip target/release/libkeryxcuda.so || true
-          ldd target/release/keryx-miner || true
-          ldd target/release/libkeryxcuda.so || true
+          strip target/release/libkeryx-llama.so || true
 
-      - name: Download official v0.5.4 HiveOS package
+          echo '=== keryx-miner dependencies ==='
+          ldd target/release/keryx-miner || true
+          echo '=== libkeryxcuda.so dependencies ==='
+          ldd target/release/libkeryxcuda.so || true
+          echo '=== libkeryx-llama.so dependencies ==='
+          ldd target/release/libkeryx-llama.so || true
+
+          file target/release/keryx-miner
+          file target/release/libkeryxcuda.so
+          file target/release/libkeryx-llama.so
+
+      - name: Download official v0.5.4 HiveOS package layout
         shell: bash
         run: |
           set -euxo pipefail
@@ -80,7 +101,7 @@ jobs:
           tar -xzf official-hiveos.tar.gz -C official-hiveos
           find official-hiveos -maxdepth 3 -type f -printf '%p\n' | sort
 
-      - name: Replace only patched binaries in official HiveOS layout
+      - name: Inject all freshly built binaries into HiveOS layout
         shell: bash
         run: |
           set -euxo pipefail
@@ -95,22 +116,32 @@ jobs:
           test -n "$CUDA_SO"
           test -n "$LLAMA_SO"
 
-          echo "Replacing official miner: $MINER"
-          echo "Replacing official CUDA plugin: $CUDA_SO"
-          echo "Keeping official llama engine unchanged: $LLAMA_SO"
+          echo "Replacing miner: $MINER"
+          echo "Replacing CUDA plugin: $CUDA_SO"
+          echo "Replacing llama engine: $LLAMA_SO"
 
           install -m 0755 target/release/keryx-miner "$MINER"
           install -m 0755 target/release/libkeryxcuda.so "$CUDA_SO"
+          install -m 0755 target/release/libkeryx-llama.so "$LLAMA_SO"
+
+          cmp -s target/release/keryx-miner "$MINER"
+          cmp -s target/release/libkeryxcuda.so "$CUDA_SO"
+          cmp -s target/release/libkeryx-llama.so "$LLAMA_SO"
 
           cat > "$ROOT/CUDA-RECONNECT-FIX.txt" <<EOF
           Keryx miner v0.5.4-PoM — HiveOS CUDA reconnect fix
           Branch: fix/cuda-reconnect-context-poisoning
           Commit: $GITHUB_SHA
-          Build: Ubuntu 22.04 / Linux x86_64 GNU / CUDA 12.2.2
-          Patched: keryx-miner + libkeryxcuda.so
-          Unchanged from official v0.5.4-PoM: libkeryx-llama.so and HiveOS integration files
-          Fix: do not recreate poisoned CUDA contexts in-process after Stratum disconnect;
-               treat illegal-memory/illegal-address faults as fatal and require process restart.
+          Build host: Ubuntu 22.04 / Linux x86_64 GNU
+          CUDA compiler: 12.2.2
+          POM_SM_LIST: $POM_SM_LIST
+          KERYX_LLAMA_ARCHS: $KERYX_LLAMA_ARCHS
+          Freshly compiled from this commit:
+            - keryx-miner
+            - libkeryxcuda.so
+            - libkeryx-llama.so (llama.cpp b10015, NOT skipped)
+          HiveOS scripts/layout are taken from official v0.5.4-PoM.
+          Fix: CUDA sticky faults cause a clean process restart instead of in-process context reuse.
           EOF
 
           mkdir -p dist
@@ -118,11 +149,16 @@ jobs:
           tar -C "$(dirname "$ROOT")" -czf "$ARCHIVE" "$(basename "$ROOT")"
           sha256sum "$ARCHIVE" | tee dist/SHA256.txt
 
-      - name: Verify packaged files
+      - name: Verify final HiveOS package
         shell: bash
         run: |
           set -euxo pipefail
-          tar -tzf dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz | head -100
+          tar -tzf dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz | head -120
+          mkdir verify-package
+          tar -xzf dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz -C verify-package
+          test -n "$(find verify-package -type f -name 'libkeryx-llama.so' -print -quit)"
+          test -n "$(find verify-package -type f -name 'libkeryxcuda.so' -print -quit)"
+          test -n "$(find verify-package -type f -name 'keryx-miner' -print -quit)"
 
       - name: Upload compiled HiveOS miner
         uses: actions/upload-artifact@v4
