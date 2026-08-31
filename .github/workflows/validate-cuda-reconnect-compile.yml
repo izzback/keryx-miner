@@ -1,4 +1,4 @@
-name: Validate CUDA reconnect compile
+name: Build patched Keryx miner Windows
 
 on:
   push:
@@ -13,45 +13,73 @@ on:
   workflow_dispatch:
 
 jobs:
-  cargo-check:
-    runs-on: ubuntu-latest
-    env:
-      KERYX_LLAMA_SKIP: "1"
-      POM_SM_LIST: "86"
+  windows-release:
+    runs-on: [self-hosted, Windows, X64, poolaris]
+    timeout-minutes: 120
     steps:
-      - name: Checkout sources
+      - name: Checkout patched branch
         uses: actions/checkout@v4
+        with:
+          clean: true
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Provide deterministic nvcc shim for Rust type-check
-        shell: bash
+      - name: Ensure Rust stable
+        shell: powershell
         run: |
-          cat > "$RUNNER_TEMP/nvcc" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
-            echo 'Cuda compilation tools, release 12.2, V12.2.140'
-            exit 0
-          fi
-          out=""
-          while (($#)); do
-            if [[ "$1" == "-o" ]]; then
-              shift
-              out="$1"
-              break
-            fi
-            shift
-          done
-          test -n "$out"
-          cp plugins/cuda/resources/keryx-cuda-sm86.ptx "$out"
-          EOF
-          chmod +x "$RUNNER_TEMP/nvcc"
-          echo "NVCC=$RUNNER_TEMP/nvcc" >> "$GITHUB_ENV"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -V
+          cargo -V
 
-      - name: Cargo check miner and CUDA plugin
-        run: cargo check -p keryx-miner -p keryxcuda
+      - name: Verify CUDA 12.9
+        shell: powershell
+        run: |
+          $nvcc = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe'
+          if (!(Test-Path $nvcc)) { throw "CUDA 12.9 nvcc not found: $nvcc" }
+          & $nvcc --version
+          nvidia-smi
+
+      - name: Build release miner + CUDA plugin + llama engine
+        shell: cmd
+        env:
+          NVCC: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe
+          KERYX_LLAMA_ARCHS: 86-real
+          NUM_JOBS: 16
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44.35207
+          set "NVCC=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe"
+          set "KERYX_LLAMA_ARCHS=86-real"
+          set "NUM_JOBS=16"
+          cargo build --release -p keryx-miner -p keryxcuda
+
+      - name: Stage Windows package
+        shell: powershell
+        run: |
+          $out = 'dist\keryx-miner-v0.5.4-cuda-reconnect-fix-win64'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item 'target\release\keryx-miner.exe' $out
+          Copy-Item 'target\release\keryxcuda.dll' $out
+          if (Test-Path 'target\release\keryx-llama.dll') {
+            Copy-Item 'target\release\keryx-llama.dll' $out
+          } else {
+            throw 'keryx-llama.dll was not produced; refusing to publish an incomplete OPoI miner package'
+          }
+          @"
+          Keryx miner v0.5.4 CUDA reconnect fix
+          Branch: fix/cuda-reconnect-context-poisoning
+          Commit: $env:GITHUB_SHA
+          Target: Windows x64 / MSVC / CUDA 12.9
+          llama CUDA arch: sm_86 (RTX 30/Ampere)
+          "@ | Set-Content -Encoding UTF8 "$out\BUILD-INFO.txt"
+          Compress-Archive -Path "$out\*" -DestinationPath 'dist\keryx-miner-v0.5.4-cuda-reconnect-fix-win64.zip' -Force
+          Get-FileHash 'dist\keryx-miner-v0.5.4-cuda-reconnect-fix-win64.zip' -Algorithm SHA256 | Format-List
+
+      - name: Upload compiled miner
+        uses: actions/upload-artifact@v4
+        with:
+          name: keryx-miner-v0.5.4-cuda-reconnect-fix-win64
+          path: dist/keryx-miner-v0.5.4-cuda-reconnect-fix-win64.zip
+          if-no-files-found: error
+          retention-days: 7
