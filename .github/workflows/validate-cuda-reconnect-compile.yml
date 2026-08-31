@@ -15,7 +15,7 @@ on:
 
 jobs:
   hiveos-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
       KERYX_LLAMA_SKIP: "1"
@@ -52,6 +52,7 @@ jobs:
           cargo -V
           nvcc -V
           protoc --version
+          ldd --version | head -1
 
       - name: Build patched Linux release miner and CUDA plugin
         shell: bash
@@ -65,6 +66,8 @@ jobs:
           test -f target/release/libkeryxcuda.so
           strip target/release/keryx-miner || true
           strip target/release/libkeryxcuda.so || true
+          ldd target/release/keryx-miner || true
+          ldd target/release/libkeryxcuda.so || true
 
       - name: Download official v0.5.4 HiveOS package
         shell: bash
@@ -103,7 +106,7 @@ jobs:
           Keryx miner v0.5.4-PoM — HiveOS CUDA reconnect fix
           Branch: fix/cuda-reconnect-context-poisoning
           Commit: $GITHUB_SHA
-          Build: Linux x86_64 GNU / CUDA 12.2.2
+          Build: Ubuntu 22.04 / Linux x86_64 GNU / CUDA 12.2.2
           Patched: keryx-miner + libkeryxcuda.so
           Unchanged from official v0.5.4-PoM: libkeryx-llama.so and HiveOS integration files
           Fix: do not recreate poisoned CUDA contexts in-process after Stratum disconnect;
