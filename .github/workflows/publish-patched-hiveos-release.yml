@@ -31,8 +31,48 @@ jobs:
             --dir release-assets
           test -f release-assets/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz
           test -f release-assets/SHA256.txt
-          cat release-assets/SHA256.txt
           ls -lh release-assets
+
+      - name: Repack with HiveOS custom miner root
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ARCHIVE='release-assets/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz'
+          TARGET='keryx-miner-v0.5.4-PoM-cuda-reconnect-fix'
+
+          rm -rf repack
+          mkdir -p repack/extracted
+          tar -xzf "$ARCHIVE" -C repack/extracted
+
+          ROOT="$(find repack/extracted -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          test -n "$ROOT"
+          test -f "$ROOT/h-manifest.conf"
+          test -f "$ROOT/h-config.sh"
+          test -f "$ROOT/h-run.sh"
+          test -f "$ROOT/h-stats.sh"
+          test -x "$ROOT/keryx-miner"
+          test -f "$ROOT/libkeryxcuda.so"
+          test -f "$ROOT/libkeryx-llama.so"
+
+          mv "$ROOT" "repack/$TARGET"
+          rm -rf repack/extracted
+
+          tar -C repack -czf "$ARCHIVE" "$TARGET"
+          sha256sum "$ARCHIVE" | tee release-assets/SHA256.txt
+
+          echo '=== HiveOS archive root ==='
+          tar -tzf "$ARCHIVE" | head -40
+          test "$(tar -tzf "$ARCHIVE" | head -1)" = "$TARGET/"
+
+          mkdir -p verify
+          tar -xzf "$ARCHIVE" -C verify
+          test -f "verify/$TARGET/h-manifest.conf"
+          test -f "verify/$TARGET/h-config.sh"
+          test -f "verify/$TARGET/h-run.sh"
+          test -f "verify/$TARGET/h-stats.sh"
+          test -x "verify/$TARGET/keryx-miner"
+          test -f "verify/$TARGET/libkeryxcuda.so"
+          test -f "verify/$TARGET/libkeryx-llama.so"
 
       - name: Publish GitHub Release
         env:
@@ -61,6 +101,9 @@ jobs:
           - addresses the CUDA lifecycle/reconnect failure observed after Stratum disconnects;
           - avoids reusing/recreating CUDA workers inside a process whose CUDA state may be invalid;
           - requires a clean process restart when CUDA workers are active after disconnect/fatal CUDA state, allowing HiveOS supervision to relaunch with fresh CUDA process state.
+
+          HiveOS package layout:
+          - archive root is keryx-miner-v0.5.4-PoM-cuda-reconnect-fix/ so HiveOS can find h-manifest.conf and the h-*.sh integration scripts at the expected custom-miner path.
 
           This build does not claim to identify the exact CUDA kernel instruction responsible for the original illegal-memory-access event.
           EOF
