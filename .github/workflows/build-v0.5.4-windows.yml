@@ -34,7 +34,7 @@ jobs:
         with:
           cuda: '12.2.2'
           method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart_dev", "cublas", "cublas_dev", "curand", "curand_dev", "visual_studio_integration"]'
+          sub-packages: '["nvcc", "cudart", "cudart_dev", "cublas", "cublas_dev", "curand", "curand_dev"]'
 
       - name: Show toolchain
         shell: pwsh
