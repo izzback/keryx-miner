@@ -24,10 +24,7 @@ jobs:
       - name: Apply deterministic source edits
         run: python3 patches/apply_cuda_reconnect_fix.py
 
-      - name: Format modified Rust sources
-        run: rustfmt --edition 2021 src/main.rs src/miner.rs src/pom_gpu.rs plugins/cuda/src/worker.rs
-
-      - name: Validate diff
+      - name: Validate exact source diff
         shell: bash
         run: |
           git diff --check
