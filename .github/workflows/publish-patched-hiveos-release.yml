@@ -1,0 +1,83 @@
+name: Publish patched HiveOS release
+
+on:
+  push:
+    branches:
+      - fix/cuda-reconnect-context-poisoning
+    paths:
+      - .github/workflows/publish-patched-hiveos-release.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download successful HiveOS build artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          gh run download 33442232359 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos \
+            --dir release-assets
+          test -f release-assets/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz
+          test -f release-assets/SHA256.txt
+          cat release-assets/SHA256.txt
+          ls -lh release-assets
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG='v0.5.4-PoM-cuda-reconnect-fix'
+          TITLE='Keryx Miner v0.5.4-PoM CUDA Reconnect Fix — HiveOS'
+          cat > release-notes.md <<'EOF'
+          Unofficial patched HiveOS build based on Keryx Miner v0.5.4-PoM.
+
+          Build source commit: 7b26467852d162dc97c212241a00048dffdbe17d
+          Build workflow run: 33442232359
+          Build target: Linux x86_64 / HiveOS
+          CUDA toolkit: 12.2.2
+
+          Included freshly compiled components:
+          - keryx-miner
+          - libkeryxcuda.so
+          - libkeryx-llama.so
+
+          The llama inference engine is included and was compiled normally; KERYX_LLAMA_SKIP was not used.
+
+          Purpose of this build:
+          - addresses the CUDA lifecycle/reconnect failure observed after Stratum disconnects;
+          - avoids reusing/recreating CUDA workers inside a process whose CUDA state may be invalid;
+          - requires a clean process restart when CUDA workers are active after disconnect/fatal CUDA state, allowing HiveOS supervision to relaunch with fresh CUDA process state.
+
+          This build does not claim to identify the exact CUDA kernel instruction responsible for the original illegal-memory-access event.
+          EOF
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              release-assets/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz \
+              release-assets/SHA256.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              release-assets/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz \
+              release-assets/SHA256.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target 7b26467852d162dc97c212241a00048dffdbe17d \
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
