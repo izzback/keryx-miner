@@ -1,0 +1,109 @@
+name: Build Keryx Miner v0.5.4 Windows
+
+on:
+  push:
+    branches:
+      - build-v0.5.4
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout v0.5.4 build branch
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install CUDA 12.2.2
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.2.2'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart_dev", "cublas", "cublas_dev", "curand", "curand_dev", "visual_studio_integration"]'
+
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+          protoc --version
+          cmake --version
+          nvcc --version
+          cl
+
+      - name: Build release
+        shell: pwsh
+        env:
+          KERYX_LLAMA_ARCHS: '75-real;80-real;86-real;89-real;89-virtual'
+          POM_SM_LIST: '90,89,86,80,75,70,61'
+        run: |
+          cargo build --release --locked -p keryx-miner
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\keryx-miner.exe dist\
+          Copy-Item target\release\keryx-llama.dll dist\
+
+          $cudaDlls = @(
+            'cudart64_12.dll',
+            'cublas64_12.dll',
+            'cublasLt64_12.dll',
+            'curand64_10.dll'
+          )
+          foreach ($dll in $cudaDlls) {
+            $src = Join-Path $env:CUDA_PATH "bin\$dll"
+            if (Test-Path $src) {
+              Copy-Item $src dist\
+            } else {
+              Write-Warning "CUDA runtime DLL not found: $src"
+            }
+          }
+
+          @"
+          Keryx Miner 0.5.4
+          Source: https://github.com/Keryx-Labs/keryx-miner
+          Upstream commit: d1b5cbcc5a80a797473058e6c19baad533a1e7b4
+          Build branch: build-v0.5.4
+          CUDA toolkit: 12.2.2
+          Target: x86_64-pc-windows-msvc
+          "@ | Set-Content -Encoding UTF8 dist\BUILD-INFO.txt
+
+          Get-ChildItem dist | ForEach-Object {
+            if (-not $_.PSIsContainer) {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          } | Set-Content -Encoding ASCII dist\SHA256SUMS.txt
+
+          7z a -tzip -mx=5 keryx-miner-v0.5.4-win64-amd64.zip .\dist\*
+          $zipHash = (Get-FileHash .\keryx-miner-v0.5.4-win64-amd64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$zipHash  keryx-miner-v0.5.4-win64-amd64.zip" | Set-Content -Encoding ASCII keryx-miner-v0.5.4-win64-amd64.zip.sha256
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keryx-miner-v0.5.4-win64-amd64
+          path: |
+            keryx-miner-v0.5.4-win64-amd64.zip
+            keryx-miner-v0.5.4-win64-amd64.zip.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
