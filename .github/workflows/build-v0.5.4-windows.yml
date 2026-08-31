@@ -33,7 +33,7 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: '12.9.2'
-          method: 'network'
+          method: 'local'
           sub-packages: '["nvcc", "cudart", "cudart_dev", "cublas", "cublas_dev", "curand", "curand_dev"]'
 
       - name: Show toolchain
