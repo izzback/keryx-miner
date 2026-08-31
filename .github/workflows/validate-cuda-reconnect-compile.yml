@@ -1,4 +1,4 @@
-name: Build patched Keryx miner Windows
+name: Build patched Keryx miner HiveOS
 
 on:
   push:
@@ -9,12 +9,13 @@ on:
       - src/miner.rs
       - src/pom_gpu.rs
       - plugins/cuda/src/worker.rs
+      - integrations/hiveos/**
       - .github/workflows/validate-cuda-reconnect-compile.yml
   workflow_dispatch:
 
 jobs:
-  windows-release:
-    runs-on: windows-latest
+  hiveos-release:
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       KERYX_LLAMA_SKIP: "1"
@@ -24,75 +25,108 @@ jobs:
         with:
           clean: true
 
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config curl unzip tar
+
       - name: Install protoc
         uses: arduino/setup-protoc@v3
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install CUDA 12.9 compiler
+      - name: Install CUDA 12.2 compiler
         uses: Jimver/cuda-toolkit@v0.2.36
         id: cuda-toolkit
         with:
-          cuda: '12.9.2'
+          cuda: '12.2.2'
           method: network
           sub-packages: '["nvcc"]'
 
       - name: Verify toolchain
-        shell: powershell
+        shell: bash
         run: |
           rustc -V
           cargo -V
           nvcc -V
           protoc --version
 
-      - name: Build patched release miner and CUDA plugin
-        shell: powershell
+      - name: Build patched Linux release miner and CUDA plugin
+        shell: bash
         env:
           KERYX_LLAMA_SKIP: "1"
         run: |
-          $env:NVCC = (Get-Command nvcc).Source
+          set -euxo pipefail
+          export NVCC="$(command -v nvcc)"
           cargo build --release -p keryx-miner -p keryxcuda
-          if (!(Test-Path 'target\release\keryx-miner.exe')) { throw 'keryx-miner.exe missing' }
-          if (!(Test-Path 'target\release\keryxcuda.dll')) { throw 'keryxcuda.dll missing' }
+          test -x target/release/keryx-miner
+          test -f target/release/libkeryxcuda.so
+          strip target/release/keryx-miner || true
+          strip target/release/libkeryxcuda.so || true
 
-      - name: Retrieve official v0.5.4 llama engine
-        shell: powershell
+      - name: Download official v0.5.4 HiveOS package
+        shell: bash
         run: |
-          $url = 'https://github.com/Keryx-Labs/keryx-miner/releases/download/v0.5.4-PoM/keryx-miner-v0.5.4-PoM-win64-amd64.zip'
-          Invoke-WebRequest -Uri $url -OutFile 'official-v0.5.4.zip'
-          Expand-Archive -Path 'official-v0.5.4.zip' -DestinationPath 'official-v0.5.4' -Force
-          $llama = Get-ChildItem 'official-v0.5.4' -Recurse -File -Filter 'keryx-llama.dll' | Select-Object -First 1
-          if (-not $llama) { throw 'Official v0.5.4 keryx-llama.dll not found' }
-          Copy-Item $llama.FullName 'target\release\keryx-llama.dll'
-          Write-Host "Reusing official unchanged llama engine: $($llama.FullName)"
+          set -euxo pipefail
+          curl -fL --retry 4 --retry-delay 2 \
+            'https://github.com/Keryx-Labs/keryx-miner/releases/download/v0.5.4-PoM/keryx-miner-v0.5.4_PoM_hiveos.tar.gz' \
+            -o official-hiveos.tar.gz
+          mkdir official-hiveos
+          tar -xzf official-hiveos.tar.gz -C official-hiveos
+          find official-hiveos -maxdepth 3 -type f -printf '%p\n' | sort
 
-      - name: Stage Windows package
-        shell: powershell
+      - name: Replace only patched binaries in official HiveOS layout
+        shell: bash
         run: |
-          $out = 'dist\keryx-miner-v0.5.4-cuda-reconnect-fix-win64'
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Copy-Item 'target\release\keryx-miner.exe' $out
-          Copy-Item 'target\release\keryxcuda.dll' $out
-          Copy-Item 'target\release\keryx-llama.dll' $out
-          @"
-          Keryx miner v0.5.4 CUDA reconnect fix
+          set -euxo pipefail
+          ROOT="$(find official-hiveos -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          test -n "$ROOT"
+
+          MINER="$(find "$ROOT" -maxdepth 2 -type f \( -name 'keryx-miner' -o -name 'keryx-miner-*linux*' \) | head -n1)"
+          CUDA_SO="$(find "$ROOT" -maxdepth 2 -type f -name 'libkeryxcuda.so' | head -n1)"
+          LLAMA_SO="$(find "$ROOT" -maxdepth 2 -type f -name 'libkeryx-llama.so' | head -n1)"
+
+          test -n "$MINER"
+          test -n "$CUDA_SO"
+          test -n "$LLAMA_SO"
+
+          echo "Replacing official miner: $MINER"
+          echo "Replacing official CUDA plugin: $CUDA_SO"
+          echo "Keeping official llama engine unchanged: $LLAMA_SO"
+
+          install -m 0755 target/release/keryx-miner "$MINER"
+          install -m 0755 target/release/libkeryxcuda.so "$CUDA_SO"
+
+          cat > "$ROOT/CUDA-RECONNECT-FIX.txt" <<EOF
+          Keryx miner v0.5.4-PoM — HiveOS CUDA reconnect fix
           Branch: fix/cuda-reconnect-context-poisoning
-          Commit: $env:GITHUB_SHA
-          Target: Windows x64 / MSVC
-          PoM CUDA PTX compiled with CUDA 12.9.2
-          keryx-llama.dll: unchanged official v0.5.4-PoM Windows release
-          Primary target rig: RTX 3080 / sm_86
-          "@ | Set-Content -Encoding UTF8 "$out\BUILD-INFO.txt"
-          Compress-Archive -Path "$out\*" -DestinationPath 'dist\keryx-miner-v0.5.4-cuda-reconnect-fix-win64.zip' -Force
-          Get-FileHash 'dist\keryx-miner-v0.5.4-cuda-reconnect-fix-win64.zip' -Algorithm SHA256 | Tee-Object -FilePath 'dist\SHA256.txt'
+          Commit: $GITHUB_SHA
+          Build: Linux x86_64 GNU / CUDA 12.2.2
+          Patched: keryx-miner + libkeryxcuda.so
+          Unchanged from official v0.5.4-PoM: libkeryx-llama.so and HiveOS integration files
+          Fix: do not recreate poisoned CUDA contexts in-process after Stratum disconnect;
+               treat illegal-memory/illegal-address faults as fatal and require process restart.
+          EOF
 
-      - name: Upload compiled miner
+          mkdir -p dist
+          ARCHIVE='dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz'
+          tar -C "$(dirname "$ROOT")" -czf "$ARCHIVE" "$(basename "$ROOT")"
+          sha256sum "$ARCHIVE" | tee dist/SHA256.txt
+
+      - name: Verify packaged files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tar -tzf dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz | head -100
+
+      - name: Upload compiled HiveOS miner
         uses: actions/upload-artifact@v4
         with:
-          name: keryx-miner-v0.5.4-cuda-reconnect-fix-win64
+          name: keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos
           path: |
-            dist/keryx-miner-v0.5.4-cuda-reconnect-fix-win64.zip
+            dist/keryx-miner-v0.5.4-PoM-cuda-reconnect-fix-hiveos.tar.gz
             dist/SHA256.txt
           if-no-files-found: error
           retention-days: 7
